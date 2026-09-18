@@ -131,4 +131,28 @@ Watch the status slot after a minute. `last ping read 20k $0.01` reports the for
 
 ## Tests and typecheck
 
-`claude plugin test .` runs thirty-six tests on the mock clock: the store keyed by session (another session's window not arming this one, this session's window restored on start, off deleting only this session's keys, this session's own dead window and the bare 2.1.0 keys cleared at start while every other session's keys, live or dead, are left alone), durations in days past two days, the bare command, the always switch seeded with a stale window and a testing knob, cold-window expiry clearing its testing period and a turn after sleep clearing expired settings before auto-arming, a window armed on a cold cache by /keepwarm and by the always switch scheduling no ping until the next turn and one 50 minutes after it, a partial write and a zero read stopping the loop while a ping's own small write does not, output and uncached input in the ping figure with Sonnet 5 priced as itself, the break-even line, the refusal and the resend, slash commands and warm and small sends passing, warn mode, a paid cold write scored and arming keepwarm, context taken from the live window rather than a turn's summed usage, /clear forgetting everything, an unguarded full miss scored, silence after a compaction, the resume seeding, the both-forms notice, and the keepwarm cases from 0.1. For types, run `/plugin-types` inside a session in this folder, then `npx -p typescript tsc -p .`. Never commit `.claude/types/`.
+Run from the repository root:
+
+```sh
+claude plugin validate .claude-plugin/plugin.json
+claude plugin test .
+```
+
+The [36 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+
+- **Guard:** refuse once and resend, warn mode, slash commands, small contexts, resume seeding and cold-write scoring.
+- **Warming:** command defaults, always/off, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
+- **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
+- **Pricing and display:** model matching, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
+
+These tests do not validate server-side cache retention. See [the live check](#prove-it-on-your-own-session).
+
+### Typecheck
+
+Generate declarations by running `/plugin-types` inside a Claude Code session opened in this repository. Then, from the repository root:
+
+```sh
+npx -p typescript tsc -p .
+```
+
+Generated declarations live in `.claude/types/`. Keep them untracked.
