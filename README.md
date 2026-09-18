@@ -2,11 +2,11 @@
 
 Keep Claude Code's prompt cache warm during breaks. See the estimated rewrite cost before sending into a cold session.
 
-This repository contains the Mod, which runs inside Claude Code. For warnings and a standalone status-line countdown without early-access function hooks, use the [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax).
+This repository contains the Mod, which runs inside Claude Code. For the same guard without early-access function hooks (it warns by default; `CACHE_TAX_BLOCK=1` refuses once), plus a standalone status-line countdown, use the [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax).
 
 ![Recorded keepwarm status: last ping read 75k tokens at $0.02](site/assets/keepwarm-receipt.png)
 
-Recorded on Sonnet 5 on 16 September 2026, using the one-minute testing interval. This is one session's receipt, not a universal ping price.
+Recorded on Sonnet 5 on 16 September 2026, using the one-minute testing interval. This is one session's receipt, not a universal ping price. Captured on the 2.0.0 build; its card priced the rewrite at $0.45 with an older Sonnet row, and the current build prints $0.30 for the same context.
 
 ## Start here
 
@@ -23,9 +23,9 @@ The timer assumes a one-hour cache. Included subscription usage defaults to one 
 
 ## What it does
 
-**It stops you once.** Press Enter on a session whose 1-hour cache has lapsed and whose context is over 50k tokens, and the message is dropped before anything is sent, with the price on screen. Press Enter on the same message again and it goes through. One deliberate payment instead of an accidental one. `/cache-tax guard warn` turns that into a price shown while the message sends, which is what the hook does by default.
+**It stops you once.** Press Enter on a session whose 1-hour cache has lapsed and whose context is 50k tokens or more, and the message is dropped before anything is sent, with the price on screen. Press Enter on the same message again and it goes through. One deliberate payment instead of an accidental one. `/cache-tax guard warn` turns that into a price shown while the message sends, which is what the hook does by default.
 
-**It keeps the cache warm for a window you set.** `/keepwarm` arms a six-hour timer (`/keepwarm 90m` for your own window, `/keepwarm always` to arm one at every session start) that re-arms on every model request; after 50 idle minutes it sends one tool-less fork over the session's own transcript, which the server answers from cache, refreshing the hour. A ping costs a cache read plus whatever it sends and the model says back, which a fork cannot cap: about five cents on 200k tokens when the answer is one word, against $4.00 for the re-write. It stops itself the moment a ping reads nothing or writes at least a tenth of what it read. Armed on a cache that is already cold, by `/keepwarm`, by the always switch or by a resume, it schedules only window-expiry cleanup until your next turn, because a ping onto a cold cache would itself pay the write; the reply and the status slot say so. After you pay a cold write, guarded or not, it arms this for you for three hours. A window belongs to the session that armed it: a second session, or one resumed from another transcript, starts with its own, and resuming the same session gets its window back.
+**It keeps the cache warm for a window you set.** `/keepwarm` arms a six-hour timer (`/keepwarm 90m` for your own window, `/keepwarm always` to arm one at every session start) that re-arms on every model request; after 50 idle minutes it sends one tool-less fork over the session's own transcript, which the server answers from cache and which refreshes the cache's timer. A ping costs a cache read plus whatever it sends and the model says back, which a fork cannot cap: about five cents on 200k tokens when the answer is one word, against $4.00 for the re-write. It stops itself the moment a ping reads nothing or writes at least a tenth of what it read. Armed on a cache that is already cold, by `/keepwarm`, by the always switch or by a resume, it schedules only window-expiry cleanup until your next turn, because a ping onto a cold cache would itself pay the write; the reply and the status slot say so. After you pay a cold write, guarded or not, it arms this for you for three hours. A window belongs to the session that armed it: a second session, or one resumed from another transcript, starts with its own, and resuming the same session gets its window back.
 
 **It keeps score.** `/cache-tax` shows warm or cold, context size, the cold price, the break-even (how many pings cost one cold write, and how much idle that covers), keepwarm state, the guard mode, and this session's cold writes with their total.
 
@@ -57,7 +57,7 @@ The hook and the mod share a name and a job, so having both means two guards on 
 
 ## What it can reach
 
-Validated on Claude Code 2.1.275:
+Validated on Claude Code 2.1.276:
 
     ❯ ./register.ts hooks: session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-tax}, prompt.submit, turn.step, turn.complete, session.compact
     ❯ ./register.ts calls: $.clock.after (via arm), $.clock.now, $.command.list, $.command.register, $.model.fork (via ping), $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.log, $.ui.status
@@ -79,6 +79,7 @@ Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at
 
 - Function hooks are early access; nothing loads without `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, and the API can change between releases.
 - The hour and the 50-minute ping assume the 1-hour tier. Check your billing path and [cache settings](https://code.claude.com/docs/en/prompt-caching#cache-lifetime); five-minute caches are not protected by this schedule.
+- Claude Code requests the five-minute TTL for forks by default, even on a subscription. Set [`subagentPromptCacheTtl`](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself) to `1h` so the ping's own request asks for the hour. The recorded runs used the one-minute testing interval, which shows each ping read the cache but not how long that read kept it alive; whether a 50-minute ping extends the usable cache, and whether the engine's fork honours that setting, is not yet measured.
 - A ping that reads warm proves the cache was warm then. Prefix changes can invalidate the cache regardless of time. The exact effect depends on the model and when Claude Code applies the change; see [Claude Code's cache behavior](https://code.claude.com/docs/en/prompt-caching).
 - Resume fields let the guard check the first ordinary send after resuming. If those fields are absent, the first turn seeds its clock and context.
 - The refusal's token count is an upper bound: it is the context the engine reports for the last response, which on a resume includes that response's output, and the mod has no separate output count to subtract.
@@ -95,7 +96,7 @@ To keep it on, add this to `~/.claude/settings.json`, which also loads the hooks
 
     { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
 
-Then from this marketplace:
+Install through the claude-code-mods marketplace:
 
     claude plugin marketplace add karanb192/claude-code-mods
     claude plugin install cache-tax@claude-code-mods
