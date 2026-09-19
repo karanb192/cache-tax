@@ -51,7 +51,7 @@ Sonnet 5, 16 September 2026: the status reported **75k tokens read at $0.02**. N
 
 When the cached prefix expires, even “give me a recap” can trigger a rewrite of the old context before the answer. The 80x figure compares Fable 5.1's one-hour write and cache-read rates; it is not a claim of 80x total savings.
 
-[Watch the 15-second animated explanation](docs/assets/cache-cost-explainer.mp4). This is an illustration, not a recording: its $9.59 figure is an example for roughly 479k tokens at Fable 5.1 list prices. It shows earlier guard wording and the original marketplace URL.
+[Watch the 23-second overview](docs/assets/cache-cost-explainer.mp4). Its designed scenes label Fable 5.1 list prices; every terminal and status-line pixel comes from the real refusal recording and keep-warm receipt above. The refusal was recorded on 2.1.1 and the keep-warm crop on 2.0.0.
 
 New to caching? [Anthropic explains how Claude Code uses it](https://code.claude.com/docs/en/prompt-caching).
 
