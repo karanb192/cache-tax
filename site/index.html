@@ -30,7 +30,7 @@
   <div class="page">
     <nav aria-label="Main navigation">
       <a class="wordmark" href="./" aria-label="Cache Tax home">cache tax</a>
-      <div class="nav-links"><a href="#install">Install</a><a href="#proof">Live receipts</a><a href="https://github.com/karanb192/cache-tax">GitHub</a></div>
+      <div class="nav-links"><a href="#install">Install</a><a href="#proof">Live receipts</a><a class="github-link" href="https://github.com/karanb192/cache-tax"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.78 5.63L21 9.54l-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91Z"/></svg>Star on GitHub</a></div>
     </nav>
     <main id="main">
       <header>
@@ -53,8 +53,8 @@
           </div>
         </div>
       </section>
-      <section id="proof">
-        <h2>Recorded in real sessions</h2>
+      <section aria-labelledby="proof">
+        <h2 id="proof">Recorded in real sessions</h2>
         <p>One verified run on Fable 5.1: a ping at minute 50 read the cache, and the message sent at minute 62 read 156,886 tokens from cache. One run, one configuration.</p>
         <figure>
           <a href="assets/keepwarm-receipt.png"><img src="assets/keepwarm-receipt.png" width="2072" height="580" alt="Recorded status slot: last ping read 75k tokens, costing $0.02. Open full-size recording." loading="lazy"></a>
@@ -68,8 +68,8 @@
           </figure>
         </details>
       </section>
-      <section id="install">
-        <h2>Two commands to install.</h2>
+      <section aria-labelledby="install">
+        <h2 id="install">Two commands to install.</h2>
         <p>Use Claude Code <a href="https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off">2.1.287 or later</a>. Mods are on by default; no early-access flag is needed.</p>
         <pre id="commands"><code>claude plugin marketplace add karanb192/claude-code-mods
 claude plugin install cache-tax@claude-code-mods</code></pre>

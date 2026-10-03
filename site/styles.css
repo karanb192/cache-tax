@@ -51,11 +51,14 @@ nav { display: flex; justify-content: space-between; align-items: center; gap: 2
 .nav-links { display: flex; gap: 32px; font-size: 16px; }
 .nav-links a { display: flex; align-items: center; min-height: 44px; text-decoration: none; }
 .nav-links a:hover { text-decoration: underline; text-decoration-color: var(--accent); }
+.github-link { gap: 6px; white-space: nowrap; }
+.github-link svg { flex-shrink: 0; }
 header { padding: 88px 0 64px; }
 h1, h2 { font-family: var(--heading); font-weight: 400; text-wrap: balance; }
 h1 { font-size: clamp(44px, 5vw, 68px); font-weight: 500; line-height: 1.18; letter-spacing: -.035em; margin: 0 0 30px; }
 h1 span { text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 3px; text-underline-offset: .16em; }
 h2 { font-size: clamp(30px, 3vw, 40px); line-height: 1.2; letter-spacing: -.025em; margin: 0 0 22px; }
+h2[id] { scroll-margin-top: 28px; }
 p { max-width: 70ch; margin: 0 0 20px; }
 .lead { max-width: 58ch; font-size: 22px; line-height: 1.5; color: var(--muted); }
 .actions { display: flex; gap: 28px; align-items: center; flex-wrap: wrap; margin: 30px 0 20px; }
@@ -102,7 +105,7 @@ footer a { display: inline-block; padding-block: 6px; }
 @media (max-width: 480px) {
   .page { padding-inline: 18px; }
   nav { flex-wrap: wrap; gap: 0; padding-block: 18px 10px; }
-  .nav-links { width: 100%; justify-content: space-between; }
+  .nav-links { width: 100%; justify-content: space-between; gap: 12px; font-size: 13px; }
   .nav-links a { white-space: nowrap; }
 }
 
