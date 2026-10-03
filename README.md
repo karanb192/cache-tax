@@ -1,10 +1,10 @@
-# cache-tax
+# Cache Tax for Claude Code
 
 **Keep Claude Code's prompt cache warm during breaks.**
 
-On Fable 5.1, a one-hour cache write costs **80x a cache read per token**: [$20 versus $0.25 per million tokens](https://platform.claude.com/docs/en/about-claude/pricing). Run `/keepwarm` before stepping away. If you return cold, the guard stops your send once with the estimated rewrite price.
+Cache Tax is a Claude Code mod that refreshes your prompt cache while you step away and shows the estimated rewrite cost before a cold send. Run `/keepwarm 90m` before a break. Pings cost tokens; choose a window you expect to return within.
 
-**[Install](#install)** · [How it works](#how-it-works) · [Costs and limits](#cost-and-the-plan-limit-question) · [Commands](#commands)
+**[Install](#install)** · [Website](https://cachetax.aidojo.si/) · [How it works](#how-it-works) · [Costs and limits](#cost-and-the-plan-limit-question) · [Commands](#commands)
 
 ![Real recording of cache-tax stopping a cold send with a $6.61 estimate](site/assets/refusal.gif)
 
@@ -12,24 +12,20 @@ A two-line recap in a 330k-token session triggered a **$6.61 estimate**. After r
 
 ## Install
 
-Needs early-access function hooks, a one-hour cache and Claude Code left running. Pings cost tokens, including uncapped output.
+Needs [Claude Code 2.1.287 or later](https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off), a one-hour cache and Claude Code left running. Mods are on by default. Pings cost tokens, including uncapped output.
 
 ```sh
 claude plugin marketplace add karanb192/claude-code-mods
 claude plugin install cache-tax@claude-code-mods
 ```
 
-Start Claude Code with function hooks enabled:
-
-```sh
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
-```
+Restart Claude Code or run `/reload-plugins` in an open session. No early-access flag is needed. If you set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` previously, remove it; current Claude Code ignores it.
 
 In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a shorter window, or `/keepwarm off` to stop.
 
 **Check the main cache lifetime.** Included subscription usage defaults to one hour. API-key, usage-credit and cloud-provider sessions default to five minutes, so set [`promptCacheTtl`](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself) to `"1h"` for those billing paths. A 50-minute timer cannot protect a five-minute main cache. See [Limits](#limits) for the fork evidence.
 
-**No function hooks yet?** The [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax) warns by default, refuses once with `CACHE_TAX_BLOCK=1`, and provides a standalone status-line countdown. Warming is part of this Mod.
+**Prefer a settings hook?** The [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax) warns by default, refuses once with `CACHE_TAX_BLOCK=1`, and provides a standalone status-line countdown. Warming is part of this mod.
 
 ## How it works
 
@@ -49,7 +45,7 @@ Sonnet 5, 16 September 2026: the status reported **75k tokens read at $0.02**. N
 
 ## Why a short message can cost so much
 
-When the cached prefix expires, even “give me a recap” can trigger a rewrite of the old context before the answer. The 80x figure compares Fable 5.1's one-hour write and cache-read rates; it is not a claim of 80x total savings.
+When the cached prefix expires, even “give me a recap” can trigger a rewrite of the old context before the answer. Cache Tax's Fable 5.1 price row compares a $20 one-hour write with a $0.25 cache read per million tokens: 80x per token, not 80x total savings. See the [pricing assumptions](#cost-and-the-plan-limit-question) and [Anthropic's price table](https://platform.claude.com/docs/en/about-claude/pricing).
 
 [Watch the 23-second overview](docs/assets/cache-cost-explainer.mp4). Its designed scenes label Fable 5.1 list prices; every terminal and status-line pixel comes from the real refusal recording and keep-warm receipt above. The refusal was recorded on 2.1.1 and the keep-warm crop on 2.0.0.
 
@@ -77,7 +73,7 @@ The status slot while keepwarm is armed reads `keepwarm 5h10m left · ping in 37
 
 ## Both forms installed
 
-The hook and the mod share a name and a job, so having both means two guards on every cold send. The mod checks at session start whether the hook's `/cache-tax:status` command exists and says so once. Keep one. The hook stays for people who have not turned on function hooks. One thing to know before uninstalling the hook: the 🧊 row in a status line wired to `cache-tax.js` comes from the hook's files, and a mod cannot draw into the status line.
+The hook and the mod share a name and a job, so having both means two guards on every cold send. The mod checks at session start whether the hook's `/cache-tax:status` command exists and says so once. Keep one guard. The hook remains an option for people who prefer settings hooks. Before uninstalling it, check your status line: the 🧊 row wired to `cache-tax.js` comes from the hook's files. This mod uses a status slot instead.
 
 ## What it can reach
 
@@ -101,7 +97,7 @@ Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at
 
 ## Limits
 
-- Function hooks are early access; nothing loads without `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, and the API can change between releases.
+- Mods require Claude Code 2.1.287+. They are on by default, but local settings, safe mode or organization policy can prevent them from loading. See [mod controls](https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off).
 - The 50-minute schedule needs a one-hour main cache. Included subscription usage has it by default. Other billing paths need [`promptCacheTtl`](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself) set to `"1h"`.
 - One transcript-verified return at the default interval, Fable 5.1 on a subscription, 19 September 2026: `/keepwarm` armed at minute 42 of a break, the ping fired at minute 50 and read 157k, and the message sent at minute 62 read 156,886 tokens from cache and wrote 2,255. Claude Code's own cache countdown reset to 58 minutes after the ping, so the fork carried the one-hour TTL. One run, one configuration: it shows the ping kept that cache alive past the hour, not net savings for every setup. Claude Code documents forks in its non-main request bucket, normally five minutes. In this run, the fork still read the one-hour session prefix and reset the native countdown. That is observed behavior in one configuration, not proof that every provider handles the buckets identically.
 - A ping that reads warm proves the cache was warm then. Prefix changes can invalidate the cache regardless of time. The exact effect depends on the model and when Claude Code applies the change; see [Claude Code's cache behavior](https://code.claude.com/docs/en/prompt-caching).
@@ -110,15 +106,13 @@ Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at
 - The cold-write tally is per session and in memory; /clear empties it.
 - Context size is the engine's live window figure. A turn's own usage is its responses summed, which on a ten-step turn is ten reads of the context, so it is only the fallback where the host reports no live figure.
 
-## Local development and persistent setup
+## Local development
 
 From a local checkout, load it for one session:
 
-    CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
+    claude --plugin-dir .
 
-To keep it on, add this to `~/.claude/settings.json`, which also loads the hooks module of every other installed plugin that ships one:
-
-    { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
+To keep it installed, use the [marketplace commands](#install).
 
 ## Prove it on your own session
 
