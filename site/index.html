@@ -1,33 +1,109 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cache-tax: keep Claude Code's prompt cache warm</title>
-<meta name="description" content="Keep Claude Code's one-hour prompt cache warm during breaks. See the estimated rewrite cost before a cold send. Open source, with usage checks on every ping.">
-<link rel="canonical" href="https://cache-tax.karanbansal.in/">
-<meta property="og:title" content="cache-tax: keep Claude Code's prompt cache warm">
-<meta property="og:description" content="A bounded keep-warm window and a price check before cold sends, inside Claude Code.">
-<meta property="og:url" content="https://cache-tax.karanbansal.in/">
-<meta property="og:type" content="website">
-<meta property="og:image" content="https://cache-tax.karanbansal.in/assets/social-1280x640.png">
-<meta property="og:image:width" content="1280">
-<meta property="og:image:height" content="640">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://cache-tax.karanbansal.in/assets/social-1280x640.png">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
-<style>
-:root{color-scheme:light;--ink:#183b38;--muted:#536762;--line:#cfddd7}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f8faf7;color:var(--ink);font:17px/1.6 system-ui,sans-serif}main{max-width:1000px;margin:auto;padding:28px 24px 64px}nav{display:flex;gap:24px;align-items:center;flex-wrap:wrap}nav strong{margin-right:auto}a{color:inherit;text-underline-offset:4px}header{padding:64px 0 36px}h1{font-size:clamp(36px,6vw,64px);line-height:1.08;letter-spacing:-2px;max-width:800px;margin:16px 0 24px}h2{font-size:28px;line-height:1.2;margin:0 0 18px}h3{font-size:19px}p{max-width:760px}.muted,figcaption{color:var(--muted);font-size:14px}.lead{font-size:21px}.actions{display:flex;gap:12px;flex-wrap:wrap}.button,button{padding:10px 18px;border:1px solid var(--ink);border-radius:6px;background:var(--ink);color:white;text-decoration:none;font:inherit;cursor:pointer}.secondary{background:transparent;color:var(--ink)}section{padding:34px 0;border-top:1px solid var(--line);scroll-margin-top:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}figure{margin:24px 0}img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:8px}figcaption{margin-top:8px}pre{background:#eaf0eb;padding:20px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.6 ui-monospace,monospace}code{font-family:ui-monospace,monospace;overflow-wrap:anywhere}li{margin:8px 0}footer{border-top:1px solid var(--line);padding-top:24px}@media(max-width:600px){.grid{grid-template-columns:1fr}header{padding-top:36px}main{padding:20px 18px}h1{letter-spacing:-1px}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cache Tax for Claude Code | Keep your prompt cache warm</title>
+  <meta name="description" content="Cache Tax is a Claude Code mod that keeps your prompt cache warm during breaks and shows the estimated rewrite cost before a cold send. Open source, with real session recordings.">
+  <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://cachetax.aidojo.si/">
+  <meta property="og:title" content="Cache Tax for Claude Code">
+  <meta property="og:description" content="Keep your prompt cache warm during breaks. See the estimated cost before a cold send.">
+  <meta property="og:url" content="https://cachetax.aidojo.si/">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://cachetax.aidojo.si/assets/social-1280x640.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="Cache Tax for Claude Code. Keep your cache warm. Know the cost when it isn't.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://cachetax.aidojo.si/assets/social-1280x640.png">
+  <meta name="twitter:image:alt" content="Cache Tax for Claude Code. Keep your cache warm. Know the cost when it isn't.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="preload" href="fonts/poppins-medium-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/lora-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
 </head>
-<body><main>
-<nav><strong>cache-tax</strong><a href="#install">Install</a><a href="#proof">Live receipts</a><a href="https://github.com/karanb192/cache-tax">GitHub</a></nav>
-<header><p class="muted">For Claude Code · Free and open source</p><h1>Keep your prompt cache warm while you take a break.</h1><p class="lead">Arm a window before lunch. If you return to a cold session, see the estimated rewrite cost before sending.</p><div class="actions"><a class="button" href="#install">Set up cache-tax</a><a class="button secondary" href="https://github.com/karanb192/cache-tax">Read the source</a></div><p class="muted">Warming needs early-access function hooks, a one-hour cache, and Claude Code left running. Pings cost tokens.</p></header>
-<section><div class="grid"><div><h2>Keep it warm</h2><p><code>/keepwarm</code> arms six hours. After 50 idle minutes, an in-process timer sends a tool-less fork over the session. Each ping checks its usage; zero reads or writes reaching 10% of reads stop the loop. One verified run on Fable 5.1: a ping at minute 50 kept the cache alive, and the message sent at minute 62 read 156,886 tokens from cache. One run, one configuration.</p><p><code>/keepwarm off</code> stops it. An already-cold session waits for your next turn before pinging.</p></div><div><h2>Catch the cold send</h2><p>For a context of at least 50,000 tokens, the guard drops your ordinary message once when its one-hour clock says the cache is cold. It shows the estimated rewrite cost. Resend to continue.</p><p>After a detected cold write, it automatically arms a three-hour warming window. The session card keeps score.</p></div></div></section>
-<section id="proof"><h2>Recorded in real sessions</h2><figure><img src="assets/keepwarm-receipt.png" alt="Recorded status slot: last ping read 75k tokens, costing $0.02"><figcaption>Sonnet 5, 16 September 2026: the status slot reported a 75k-token cache read at $0.02. This run used the one-minute testing interval on the 2.0.0 build; its card priced the rewrite at $0.45 with an older Sonnet row, and the current build prints $0.30 for the same context. It is a receipt for this session, not a universal ping price.</figcaption></figure><details><summary>See the cold-send refusal</summary><figure><img src="assets/refusal.gif" alt="Recorded cold-send guard showing a $6.61 rewrite estimate" loading="lazy"><figcaption>Recorded on 2.1.1, before the 2.1.2 wording change. The estimate was $6.61; the subsequent reported cache write was $6.28. Current wording says “up to” the estimated token count.</figcaption></figure></details></section>
-<section id="install"><h2>Install through the marketplace</h2><pre id="commands">claude plugin marketplace add karanb192/claude-code-mods
-claude plugin install cache-tax@claude-code-mods</pre><button type="button" data-copy="commands">Copy install commands</button><p>Start Claude Code with the early-access flag:</p><pre>CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude</pre><p>In a warm session, run <code>/keepwarm</code>. Use <code>/keepwarm 90m</code> for a shorter window. Start with a window you expect to return within.</p><p><strong>No function hooks yet?</strong> The <a href="https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax">hook version</a> warns by default, refuses once with <code>CACHE_TAX_BLOCK=1</code>, and adds a status-line countdown that can also run on its own.</p></section>
-<section><h2>Know what you are paying for</h2><ul><li>The Mod assumes a one-hour cache. API-key and other billing paths can default to five minutes. Check <a href="https://code.claude.com/docs/en/prompt-caching#cache-lifetime">your cache lifetime</a> before using it.</li><li>A ping bills reads, writes, uncached input and output. Fork output is uncapped. The displayed dollars are API-equivalent estimates, not additional subscription charges. Quota savings have not been measured.</li><li>Prefix changes can break the cache before its timer expires. A warm read proves that ping hit the cache; it does not guarantee your next message will.</li><li>Function hooks are early access. The <a href="https://github.com/karanb192/cache-tax#what-it-can-reach">README lists hooked events, engine calls and the threat model</a>. The Mod makes a model request and stores its settings; inspect that footprint before installing.</li></ul></section>
-<footer><a href="https://github.com/karanb192/cache-tax">Source and issues</a> · <a href="https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax">Hook version</a> · <a href="https://code.claude.com/docs/en/prompt-caching">How Claude Code caches prompts</a></footer>
-</main><script>document.addEventListener('click',async e=>{const b=e.target.closest('[data-copy]');if(!b)return;try{await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent.trim());b.textContent='Copied';}catch{b.textContent='Select and copy the commands above';}});</script></body></html>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="page">
+    <nav aria-label="Main navigation">
+      <a class="wordmark" href="./" aria-label="Cache Tax home">cache tax</a>
+      <div class="nav-links"><a href="#install">Install</a><a href="#proof">Live receipts</a><a class="github-link" href="https://github.com/karanb192/cache-tax"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.78 5.63L21 9.54l-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91Z"/></svg>Star on GitHub</a></div>
+    </nav>
+    <main id="main">
+      <header>
+        <h1>Keep your cache warm.<br><span>Know the cost when it isn’t.</span></h1>
+        <p class="lead">A mod for Claude Code’s prompt cache. Keep it warm while you take a break, or see the estimated rewrite cost before you send a cold prompt.</p>
+        <div class="actions"><a class="button" href="#install">Install Cache Tax</a><a class="text-link" href="#proof">See it in a real session <span aria-hidden="true">&rarr;</span></a></div>
+        <p class="fine-print">Free and open source. Claude Code 2.1.287+. Warming needs a one-hour cache and Claude Code left running. Pings cost tokens.</p>
+      </header>
+      <section aria-label="How Cache Tax works">
+        <div class="grid">
+          <div>
+            <h2>Before your break</h2>
+            <p>Run <code>/keepwarm 90m</code> for a 90-minute window. After 50 idle minutes, Cache Tax sends a model request over the session to refresh its cache.</p>
+            <p>Each ping checks its usage. No cache reads, or writes reaching 10% of reads, stop the loop. <code>/keepwarm off</code> stops it too. An already-cold session waits for your next turn before pinging.</p>
+          </div>
+          <div>
+            <h2>When you return cold</h2>
+            <p>For a context of at least 50,000 tokens, the guard stops your ordinary message once when its one-hour clock says cold. You see the estimated rewrite cost. Resend to continue.</p>
+            <p>After a detected cold write, it automatically arms at least three hours of warming. Run <code>/cache-tax</code> to see the window and this session’s cold-write tally.</p>
+          </div>
+        </div>
+      </section>
+      <section aria-labelledby="proof">
+        <h2 id="proof">Recorded in real sessions</h2>
+        <p>One verified run on Fable 5.1: a ping at minute 50 read the cache, and the message sent at minute 62 read 156,886 tokens from cache. One run, one configuration.</p>
+        <figure>
+          <a href="assets/keepwarm-receipt.png"><img src="assets/keepwarm-receipt.png" width="2072" height="580" alt="Recorded status slot: last ping read 75k tokens, costing $0.02. Open full-size recording." loading="lazy"></a>
+          <figcaption>Sonnet 5, 16 September 2026: a 75k-token cache read at $0.02. This recording used the one-minute testing interval on 2.0.0. Its $0.45 rewrite estimate used an older price row; the current build prints $0.30 for the same context. A receipt for this session, not a universal ping price.</figcaption>
+        </figure>
+        <details>
+          <summary>See the cold-send refusal</summary>
+          <figure>
+            <a href="assets/refusal.gif"><img src="assets/refusal.gif" width="960" height="540" alt="Recorded cold-send guard showing a $6.61 rewrite estimate. Open full-size recording." loading="lazy"></a>
+            <figcaption>Recorded on 2.1.1, before the 2.1.2 wording change. The estimate was $6.61; the subsequent reported cache write was $6.28. Current wording says “up to” the estimated token count. These are API-equivalent costs, not extra subscription charges.</figcaption>
+          </figure>
+        </details>
+      </section>
+      <section aria-labelledby="install">
+        <h2 id="install">Two commands to install.</h2>
+        <p>Use Claude Code <a href="https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off">2.1.287 or later</a>. Mods are on by default; no early-access flag is needed.</p>
+        <pre id="commands"><code>claude plugin marketplace add karanb192/claude-code-mods
+claude plugin install cache-tax@claude-code-mods</code></pre>
+        <div class="copy-row"><button type="button" data-copy="commands">Copy install commands</button><span id="copy-status" role="status" class="fine-print"></span></div>
+        <p>Restart Claude Code or run <code>/reload-plugins</code> in an open session. Then run <code>/keepwarm 90m</code> before your break. Plain <code>/keepwarm</code> arms six hours.</p>
+        <p><strong>Check your cache lifetime.</strong> Warming uses a 50-minute timer. If your main cache defaults to five minutes, set <a href="https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself"><code>promptCacheTtl</code> to <code>"1h"</code></a> first.</p>
+        <p class="fine-print">Prefer a settings hook? The <a href="https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax">hook version</a> warns by default, can refuse a cold send once, and provides a standalone status-line countdown. Warming is part of this mod.</p>
+      </section>
+      <section id="limits">
+        <h2>Know what you are paying for.</h2>
+        <ul>
+          <li>A ping bills reads, writes, uncached input and output. Fork output is uncapped. The displayed dollars are API-equivalent estimates, not additional subscription charges. Quota savings have not been measured.</li>
+          <li>Prefix changes can break the cache before its timer expires. A warm read proves that ping hit the cache; it does not guarantee your next message will.</li>
+          <li>The mod makes model requests over your session and stores its settings. The <a href="https://github.com/karanb192/cache-tax#what-it-can-reach">README lists its hooks, engine calls and threat model</a>.</li>
+        </ul>
+      </section>
+    </main>
+    <footer><p>Cache Tax · An open-source mod by <a href="https://github.com/karanb192">Karan Bansal</a></p><div><a href="https://github.com/karanb192/cache-tax">Source and issues</a><a href="https://code.claude.com/docs/en/prompt-caching">About prompt caching</a></div></footer>
+  </div>
+  <script>
+    document.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-copy]');
+      if (!button) return;
+      const status = document.getElementById('copy-status');
+      button.disabled = true;
+      try {
+        await navigator.clipboard.writeText(document.getElementById(button.dataset.copy).textContent.trim());
+        status.textContent = 'Copied. Paste into your terminal.';
+      } catch {
+        status.textContent = 'Could not copy. Select and copy the commands above.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
