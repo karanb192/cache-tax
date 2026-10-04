@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { statusIcons } from './status-icons'
 
 const TTL_MS = 60 * 60 * 1000
 const PING_AFTER_MS = 50 * 60 * 1000
@@ -302,15 +303,25 @@ export const register: Register = on => {
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
-    const color = state === 'warm' ? 'success' : state === 'cold' ? '#d97757' : undefined
+    const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
+    const light = typeof theme === 'string' && theme.startsWith('light')
+    const noColor = Boolean(await $.env.get('NO_COLOR'))
+    const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
+    const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
+    const icon = noColor ? Text({ bold: true, children: ['[>]'] })
+      : e.surface === 'terminal' ? $.ui.resolve(e).Image({ source: { png: asset.png }, columns: 3, rows: 1, alt: '[>]' })
+      : e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: asset.svg, width: 18, height: 18, alt: 'Cache Tax' })
+      : Text({ color, bold: true, children: ['[>]'] })
     return Box({ flexDirection: 'column', children: [
       rest,
-      Text({ children: [
-        Text({ color, bold: true, children: ['[>]'] }),
-        ' cache-tax · ',
-        Text({ color, bold: true, children: [state] }),
-        ` · ${text}`,
+      Box({ flexDirection: 'row', alignItems: 'center', children: [
+        Box({ flexShrink: 0, children: [icon] }),
+        Text({ children: [
+          ' cache-tax · ',
+          Text({ color, bold: true, children: [state] }),
+          ` · ${text}`,
+        ] }),
       ] }),
     ] })
   })
