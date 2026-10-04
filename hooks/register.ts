@@ -295,6 +295,17 @@ export function freshState(): State {
 
 export const register: Register = on => {
   const s = freshState()
+  let light = false
+  let noColor = false
+
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined) {
+      light = typeof result.value === 'string' && result.value.startsWith('light')
+      if (s.hasBand) $.ui.invalidate('ui.render')
+    }
+    return result
+  })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e)
@@ -303,9 +314,6 @@ export const register: Register = on => {
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
-    const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
-    const light = typeof theme === 'string' && theme.startsWith('light')
-    const noColor = Boolean(await $.env.get('NO_COLOR'))
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
@@ -329,7 +337,12 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
-    if (s.hasBand) $.ui.status(undefined)
+    if (s.hasBand) {
+      const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
+      light = typeof theme === 'string' && theme.startsWith('light')
+      noColor = Boolean(await $.env.get('NO_COLOR'))
+      $.ui.status(undefined)
+    }
     s.sid = await $.session.id()
     const now = await $.clock.now()
     await prune($, s, now)

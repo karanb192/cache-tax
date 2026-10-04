@@ -80,6 +80,8 @@ The row includes the warming window, next ping and last readback. A stopped loop
 
 The cube follows Claude's light or dark theme. Its terminal image also has a contrasting edge for terminal backgrounds that differ from that setting. The embedded assets come from the website's official SVGs; maintainers can regenerate them with `python3 tools/generate-status-icons.py` and `rsvg-convert` installed. No image files are read or fetched at runtime.
 
+The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
+
 ## Both forms installed
 
 The hook and the mod share a name and a job, so having both means two guards on every cold send. The mod checks at session start whether the hook's `/cache-tax:status` command exists and says so once. Keep one guard. The hook remains an option for people who prefer settings hooks. Before uninstalling it, check your status line: the 🧊 row wired to `cache-tax.js` comes from the hook's files. This mod draws above the prompt while keepwarm is armed; it does not replace your shell status line.
@@ -88,8 +90,8 @@ The hook and the mod share a name and a job, so having both means two guards on 
 
 Validated on Claude Code 2.1.289:
 
-    ❯ ./register.ts hooks: ui.render{component=AbovePrompt}, session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-tax}, prompt.submit, turn.step, turn.complete, session.compact
-    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.model.fork (via ping), $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate (via updateStatus), $.ui.log, $.ui.resolve, $.ui.status
+    ❯ ./register.ts hooks: config.set{key=theme}, ui.render{component=AbovePrompt}, session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-tax}, prompt.submit, turn.step, turn.complete, session.compact
+    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.model.fork (via ping), $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status
     ❯ ./register.ts env reads: NO_COLOR
 
 Reach L2, drives Claude. Sees every prompt you type, every model request's timing and every answer's token counts.
@@ -103,7 +105,7 @@ Reach L2, drives Claude. Sees every prompt you type, every model request's timin
 
 ## Cost and the plan-limit question
 
-Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at $20 and answers at $50 per million tokens; Sonnet 5 has its own row ($0.20, $4, $10). On an API key the arithmetic is plain. A ping bills the cache read, its own few uncached tokens at the base rate, and whatever the model says back at the output rate; the figure in the status slot counts all of it, since a fork takes no output cap and a model at high effort may think before it says "warm". A comeback after the lapse is a write. The card prints the read-only upper bound for your model, 80 pings on Fable 5.1, with the idle that covers at the current ping period; a real ping costs a little more than a read, so the true break-even sits below that number. On a subscription the dollars are a yardstick, not the bill, and how a cache read weighs against the 5-hour and weekly limits is not documented anywhere I could find. Watch the rate-limit row of your status line during the first window.
+Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at $20 and answers at $50 per million tokens; Sonnet 5 has its own row ($0.20, $4, $10). On an API key the arithmetic is plain. A ping bills the cache read, its own few uncached tokens at the base rate, and whatever the model says back at the output rate; the displayed ping cost counts all of it, since a fork takes no output cap and a model at high effort may think before it says "warm". A comeback after the lapse is a write. The card prints the read-only upper bound for your model, 80 pings on Fable 5.1, with the idle that covers at the current ping period; a real ping costs a little more than a read, so the true break-even sits below that number. On a subscription the dollars are a yardstick, not the bill, and how a cache read weighs against the 5-hour and weekly limits is not documented anywhere I could find. Watch the rate-limit row of your status line during the first window.
 
 ## Limits
 
@@ -142,13 +144,14 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [53 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [56 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, warn mode, slash commands, small contexts, resume seeding and cold-write scoring.
 - **Warming:** command defaults, always/off, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
 - **Pricing and display:** model matching, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
 - **Indicator:** terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
+- **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
 - **Fork failures:** structured failure results from current engines and the null result returned by older releases stop without retrying.
 
 The render tests check the element tree, not native terminal or desktop pixels. They do not validate server-side cache retention. See [the live check](#prove-it-on-your-own-session).

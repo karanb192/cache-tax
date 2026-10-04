@@ -1,5 +1,5 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
-import type { CommandRunInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
 import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
@@ -28,12 +28,13 @@ const run = (command: 'keepwarm' | 'cache-tax', args: string): CommandRunInput =
 })
 
 const prompt = (text: string): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' } })
+const themeChange = (value: string): ConfigSetInput => ({ key: 'theme', value, previous: 'dark', provider: { plugin: 'engine', tier: 'core' }, origin: { kind: 'composer' } })
 
 type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: number; input?: number }
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
   if (opts.store) {
     const store = opts.store
     on('store.get', ($, e) => ({ value: store.get(e.key) }))
@@ -41,8 +42,13 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     on('store.delete', ($, e) => { store.delete(e.key); return { value: undefined } })
     on('store.keys', () => ({ value: [...store.keys()] }))
   } else mock.store(on, {})
-  mock.env(on, opts.noColor ? { NO_COLOR: '1' } : {})
-  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme?.value ?? 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  const reads = { theme: 0, env: 0 }
+  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : undefined } })
+  on('config.list', () => {
+    reads.theme++
+    return { value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme?.value ?? 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }
+  })
+  on('config.set', ($, e) => opts.denyTheme ? { deny: 'theme locked' } : { value: opts.writtenTheme ?? e.value })
   const forks: number[] = []
   const status: Array<string | undefined> = []
   const logs: string[] = []
@@ -69,7 +75,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered }
+  return { forks, status, logs, entered, reads }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -80,6 +86,45 @@ const bandProps: RenderPropsOf['AbovePrompt'] = {
 }
 
 describe('cache indicator', () => {
+  test('redraws reuse session preferences and theme changes repaint immediately', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '2h'))
+    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    await $.config.set(themeChange('light'))
+    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.warm.png })
+    await $.config.set(themeChange('dark'))
+    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('a denied theme change preserves the existing icon', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { denyTheme: true })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
+    await $.turn.complete(turn())
+    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+  })
+
+  test('the written theme wins over the requested value', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { writtenTheme: 'light' })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    await $.config.set(themeChange('dark'))
+    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.neutral.png })
+  })
+
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`${surface}: official cube follows state and theme with a text alternative`, async ($, on) => {
       const clock = mock.clock(on, { now: 10 * HOUR })
@@ -98,7 +143,7 @@ describe('cache indicator', () => {
       }
       await $.turn.complete(turn())
       expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.dark.warm.png } : statusIcons.dark.warm.svg)
-      theme.value = 'light'
+      await $.config.set(themeChange('light'))
       await clock.advance(HOUR)
       expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.light.cold.png } : statusIcons.light.cold.svg)
       expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
