@@ -17,6 +17,8 @@ The previous address, `cache-tax.karanbansal.in`, is not redirected by this PR. 
 
 Serve `site/` with a static HTTP server. Check the page on desktop and mobile, the install copy button, keyboard navigation and the expandable recording.
 
+The icon keeps the cache cube, with a prompt chevron on one face. `site/favicon.svg` is the adaptive source used in browser tabs and the site header. The README selects between fixed-color `site/assets/cache-tax-light.svg` and `site/assets/cache-tax-dark.svg` through a `<picture>` element. Keep their paths in sync when changing the shape. The social card uses the light variant. `site/favicon-32.png` is a 32 × 32 fallback rendered on the light background `#faf9f5` so it stays visible on either browser theme.
+
 `site/social-card.html` is the source for `site/assets/social-1280x640.png`. It uses the same stylesheet and fonts as the landing page and is marked `noindex`. Capture it at 1280 × 640 after the fonts have loaded. It pins the light palette so regeneration does not depend on the computer's appearance setting. This is designed preview artwork; the session recordings remain separate, unmodified assets.
 
 The typography and colors follow [Anthropic's brand-guidelines skill](https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md): Poppins headings with Arial fallback, Lora body text with Georgia fallback, dark `#141413`, light `#faf9f5`, gray `#b0aea5`, light gray `#e8e6dc` and orange `#d97757`. Fonts are self-hosted under `site/fonts/`, with their SIL Open Font License files.

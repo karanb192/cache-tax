@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/cache-tax-dark.svg">
+  <img src="site/assets/cache-tax-light.svg" alt="Cache Tax" width="64" height="64">
+</picture>
+
 # Cache Tax for Claude Code
 
 **Keep Claude Code's prompt cache warm during breaks.**

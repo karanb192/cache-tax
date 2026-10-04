@@ -48,7 +48,8 @@ a:hover { text-decoration-color: var(--accent); text-decoration-thickness: 2px; 
 .skip-link:focus { top: 12px; }
 .skip-link:hover { color: var(--paper); }
 nav { display: flex; justify-content: space-between; align-items: center; gap: 24px; min-height: 104px; border-bottom: 1px solid var(--line); }
-.wordmark { font: 500 28px/1.2 var(--heading); letter-spacing: -.035em; text-decoration: none; white-space: nowrap; }
+.wordmark { display: inline-flex; align-items: center; gap: 12px; font: 500 28px/1.2 var(--heading); letter-spacing: -.035em; text-decoration: none; white-space: nowrap; }
+.wordmark img { width: 36px; height: 36px; flex-shrink: 0; border: 0; border-radius: 0; }
 .nav-links { display: flex; gap: 32px; font-size: 16px; }
 .nav-links a { display: flex; align-items: center; min-height: 44px; text-decoration: none; }
 .nav-links a:hover { text-decoration: underline; text-decoration-color: var(--accent); }
