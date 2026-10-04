@@ -306,7 +306,12 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: [
       rest,
-      Text({ children: [Text({ color, children: ['[>]'] }), ` cache-tax · ${state} · ${text}`] }),
+      Text({ children: [
+        Text({ color, bold: true, children: ['[>]'] }),
+        ' cache-tax · ',
+        Text({ color, bold: true, children: [state] }),
+        ` · ${text}`,
+      ] }),
     ] })
   })
 
