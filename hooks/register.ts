@@ -230,6 +230,13 @@ async function ping($: EngineInterface, s: State) {
     return stop($, s, `the ping failed, ${err instanceof Error ? err.message : String(err)}`)
   }
   if (reply === null) return stop($, s, 'the engine did not send the ping, either the snapshot was cold or the API call failed')
+  if (reply.isAnswered === false) {
+    const reason = reply.reason === 'nothing-to-fork' ? 'no conversation to warm yet'
+      : reply.reason === 'api-error' ? `the API call failed${reply.status === null ? '' : ` (${reply.status})`}`
+      : reply.reason === 'aborted' ? 'the ping was interrupted'
+      : 'the ping returned no text'
+    return stop($, s, reason)
+  }
   const u = reply.usage
   const price = priceOf(s.lastModel)
   // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
@@ -342,9 +349,7 @@ export const register: Register = on => {
     return r
   })
 
-  // The resume fields Claude Code computes for settings hooks seed the guard
-  // before any turn of the resumed session has run. The test kit cannot raise
-  // classic events, so the seeding itself is the exported pure function.
+  // Resume fields seed the guard before any turn of the resumed session has run.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
     if (e.source === 'clear') {

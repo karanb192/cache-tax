@@ -10,5 +10,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": [".claude/types", "hooks", "tests"]
+  "include": [".claude-plugin/types", "hooks", "tests"]
 }
