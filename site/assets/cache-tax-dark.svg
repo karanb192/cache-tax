@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>Cache Tax</title>
+  <g stroke="#faf9f5" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path fill="#d97757" d="M8 18 32 5 56 18 32 31Z"/>
+    <path d="M8 18v28l24 13 24-13V18M32 31v28"/>
+    <path d="m40 32 8 5-8 5"/>
+  </g>
+</svg>
