@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { statusIcons } from './status-icons'
 
 const TTL_MS = 60 * 60 * 1000
 const PING_AFTER_MS = 50 * 60 * 1000
@@ -29,6 +30,7 @@ type Miss = { at: number; tokens: number; usd: number | null }
 type GuardMode = 'refuse' | 'warn'
 
 export type State = {
+  hasBand: boolean
   sid: string
   deadline: number
   every: number
@@ -146,9 +148,15 @@ function statusText(s: State, now: number): string | undefined {
   if (!s.deadline) return undefined
   const pingText = s.last ? ` · last ping read ${fmtTok(s.last.read)} ${fmtUsd(s.last.usd)}` : ''
   const nextText = !s.lastRequestAt ? ' · waiting for the first turn'
+    : s.compacted ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
+}
+
+function updateStatus($: EngineInterface, s: State, now: number) {
+  if (s.hasBand) $.ui.invalidate('ui.render')
+  else $.ui.status(statusText(s, now))
 }
 
 function disarm(s: State) {
@@ -189,7 +197,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
     s.always = false
     await $.store.delete(KEY_ALWAYS)
   }
-  $.ui.status(statusText(s, await $.clock.now()))
+  updateStatus($, s, await $.clock.now())
 }
 
 async function arm($: EngineInterface, s: State) {
@@ -199,12 +207,13 @@ async function arm($: EngineInterface, s: State) {
   if (now >= s.deadline) return stop($, s, null)
   // A cold window still needs expiry cleanup, but must not send a model request.
   if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
-    const delay = Math.min(s.deadline - now, Math.max(1000, s.lastRequestAt + s.every - now))
+    const untilCold = s.lastRequestAt + TTL_MS - now
+    const delay = Math.min(s.deadline - now, untilCold, Math.max(1000, s.lastRequestAt + s.every - now))
     s.pending = $.clock.after(delay, () => { void ping($, s) })
   } else {
     s.pending = $.clock.after(s.deadline - now, () => { void arm($, s) })
   }
-  $.ui.status(statusText(s, now))
+  updateStatus($, s, now)
 }
 
 async function ping($: EngineInterface, s: State) {
@@ -213,8 +222,8 @@ async function ping($: EngineInterface, s: State) {
   const now = await $.clock.now()
   if (now >= s.deadline) return arm($, s)
   // A turn in the meantime re-armed the timer; this callback is stale.
-  if (now - s.lastRequestAt < s.every - 1000) return
   if (isCold(s, now)) return arm($, s)
+  if (now - s.lastRequestAt < s.every - 1000) return
   let reply
   try {
     reply = await $.model.fork({ prompt: PING_PROMPT })
@@ -222,6 +231,13 @@ async function ping($: EngineInterface, s: State) {
     return stop($, s, `the ping failed, ${err instanceof Error ? err.message : String(err)}`)
   }
   if (reply === null) return stop($, s, 'the engine did not send the ping, either the snapshot was cold or the API call failed')
+  if (reply.isAnswered === false) {
+    const reason = reply.reason === 'nothing-to-fork' ? 'no conversation to warm yet'
+      : reply.reason === 'api-error' ? `the API call failed${reply.status === null ? '' : ` (${reply.status})`}`
+      : reply.reason === 'aborted' ? 'the ping was interrupted'
+      : 'the ping returned no text'
+    return stop($, s, reason)
+  }
   const u = reply.usage
   const price = priceOf(s.lastModel)
   // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
@@ -272,7 +288,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
   }
 }
@@ -280,8 +296,40 @@ export function freshState(): State {
 export const register: Register = on => {
   const s = freshState()
 
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const rest = await next(e)
+    if (!s.hasBand || e.props.hasSurvey) return rest
+    const now = await $.clock.now()
+    const text = statusText(s, now)
+    if (!text || (s.deadline && now >= s.deadline)) return rest
+    const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+    const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
+    const light = typeof theme === 'string' && theme.startsWith('light')
+    const noColor = Boolean(await $.env.get('NO_COLOR'))
+    const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
+    const { Box, Text } = $.ui.resolve(e)
+    const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
+    const icon = noColor ? Text({ bold: true, children: ['[>]'] })
+      : e.surface === 'terminal' ? $.ui.resolve(e).Image({ source: { png: asset.png }, columns: 3, rows: 1, alt: '[>]' })
+      : e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: asset.svg, width: 18, height: 18, alt: 'Cache Tax' })
+      : Text({ color, bold: true, children: ['[>]'] })
+    return Box({ flexDirection: 'column', children: [
+      rest,
+      Box({ flexDirection: 'row', alignItems: 'center', children: [
+        Box({ flexShrink: 0, children: [icon] }),
+        Text({ children: [
+          ' cache-tax · ',
+          Text({ color, bold: true, children: [state] }),
+          ` · ${text}`,
+        ] }),
+      ] }),
+    ] })
+  })
+
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
+    if (s.hasBand) $.ui.status(undefined)
     s.sid = await $.session.id()
     const now = await $.clock.now()
     await prune($, s, now)
@@ -313,13 +361,11 @@ export const register: Register = on => {
     if (commands.some(c => c.name === 'cache-tax:status')) {
       $.ui.log('the hook form (cache-tax@claude-code-hooks) is also installed, so a cold send is warned about or refused twice. Uninstall it, or /cache-tax guard warn here.')
     }
-    $.ui.status(statusText(s, now))
+    updateStatus($, s, now)
     return r
   })
 
-  // The resume fields Claude Code computes for settings hooks seed the guard
-  // before any turn of the resumed session has run. The test kit cannot raise
-  // classic events, so the seeding itself is the exported pure function.
+  // Resume fields seed the guard before any turn of the resumed session has run.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
     if (e.source === 'clear') {
@@ -327,7 +373,7 @@ export const register: Register = on => {
       s.stopped = null
       resetForClear(s)
       s.sid = await $.session.id()
-      $.ui.status(statusText(s, await $.clock.now()))
+      updateStatus($, s, await $.clock.now())
       return r
     }
     const line = seedFromResume(s, e, await $.clock.now())
@@ -454,6 +500,7 @@ export const register: Register = on => {
       s.ctx = 0
       s.ackedAt = 0
       disarm(s)
+      await arm($, s)
     }
     return r
   })
