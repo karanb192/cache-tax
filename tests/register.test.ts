@@ -9,7 +9,7 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
 
-const session: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: '/work' }
+const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
 
 const usage = (over: Partial<TurnUsage> = {}): TurnUsage => ({
   input_tokens: 2, output_tokens: 10, cache_read_input_tokens: 200000, cache_creation_input_tokens: 500, model: 'claude-fable-5-1', ...over,
