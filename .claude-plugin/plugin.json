@@ -5,5 +5,18 @@
   "author": {
     "name": "Karan Bansal"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "display": {
+      "title": "Display",
+      "description": "Where cache-tax shows its state. band: the row above the prompt (default). status: the status entry under the prompt instead. off: no row; the cold-send guard, keepwarm and /cache-tax still work.",
+      "type": "string",
+      "options": [
+        "band",
+        "status",
+        "off"
+      ],
+      "default": "band"
+    }
+  }
 }
