@@ -61,8 +61,14 @@ type PingRecord = { at: number; read: number; write: number; usd: number | null;
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
+/** Where the state shows: the band above the prompt, the status entry, or nowhere. */
+export type Display = 'band' | 'status' | 'off'
+
+export const displayOf = (options: Readonly<Record<string, unknown>>): Display =>
+  options.display === 'status' || options.display === 'off' ? options.display : 'band'
 
 export type State = {
+  display: Display
   hasBand: boolean
   sid: string
   deadline: number
@@ -304,7 +310,7 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
 
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
-  else $.ui.status(statusText(s, now))
+  else if (s.display !== 'off') $.ui.status(statusText(s, now))
   if (s.deadline > now && !s.statusRefresh) {
     // Repaint the countdown independently of the model-request and retry timers.
     const refresh = $.clock.every(STATUS_REFRESH_MS, () => {
@@ -604,7 +610,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
+    display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
   }
@@ -613,6 +619,7 @@ export function freshState(): State {
 export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
   const s = freshState()
+  s.display = displayOf(options)
   let light = false
   let noColor = false
 
@@ -659,7 +666,10 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
+    // `display: status` or `off` leaves the band to others; `off` also keeps the
+    // status entry clear. The guard, keepwarm and /cache-tax work in every mode.
+    s.hasBand = s.display === 'band' && (e.surface === 'terminal' || e.surface === 'desktop')
+    if (s.display === 'off') $.ui.status(undefined)
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')
