@@ -1,4 +1,5 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
@@ -824,5 +825,40 @@ describe('store per session', () => {
     world(on, [], { store, sid: 'mine' })
     await $.session.start(session)
     expect([...store.keys()]).toEqual(['deadline:other', 'every:other'])
+  })
+})
+
+describe('display option', () => {
+  const armed = async ($: Engine) => {
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '90m'))
+  }
+
+  test('band (the default) draws the row above the prompt', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+  })
+
+  test('status moves the state to the status entry and draws no row', { options: { display: 'status' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBe(undefined)
+    expect(w.status.some(text => typeof text === 'string' && text.startsWith('keepwarm '))).toBe(true)
+  })
+
+  test('off draws no row and no status entry, and the commands still answer', { options: { display: 'off' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBe(undefined)
+    expect(w.status.every(text => text === undefined)).toBe(true)
+    expect((await $.command.run(run('cache-tax', ''))).text).toContain('keepwarm')
   })
 })

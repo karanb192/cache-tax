@@ -82,6 +82,18 @@ The cube follows Claude's light or dark theme. Its terminal image also has a con
 
 The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
 
+## Display
+
+The `display` option picks where the state shows. Set it with `/plugin configure cache-tax@claude-code-mods`:
+
+| Value | What you see |
+|---|---|
+| `band` (default) | The row above the prompt, as above |
+| `status` | The same text as a status entry under the prompt, no row |
+| `off` | Nothing; the cold-send guard, keepwarm and `/cache-tax` still work |
+
+Use `status` or `off` when another mod already owns the space above the prompt. The option is read when the session starts.
+
 ## Both forms installed
 
 The hook and the mod share a name and a job, so having both means two guards on every cold send. The mod checks at session start whether the hook's `/cache-tax:status` command exists and says so once. Keep one guard. The hook remains an option for people who prefer settings hooks. Before uninstalling it, check your status line: the 🧊 row wired to `cache-tax.js` comes from the hook's files. This mod draws above the prompt while keepwarm is armed; it does not replace your shell status line.

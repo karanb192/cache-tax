@@ -28,8 +28,14 @@ const PRICES: Array<[string, number, number, number]> = [
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 type GuardMode = 'refuse' | 'warn'
+/** Where the state shows: the band above the prompt, the status entry, or nowhere. */
+export type Display = 'band' | 'status' | 'off'
+
+export const displayOf = (options: Readonly<Record<string, unknown>>): Display =>
+  options.display === 'status' || options.display === 'off' ? options.display : 'band'
 
 export type State = {
+  display: Display
   hasBand: boolean
   sid: string
   deadline: number
@@ -156,7 +162,7 @@ function statusText(s: State, now: number): string | undefined {
 
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
-  else $.ui.status(statusText(s, now))
+  else if (s.display !== 'off') $.ui.status(statusText(s, now))
 }
 
 function disarm(s: State) {
@@ -288,13 +294,14 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
+    display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   const s = freshState()
+  s.display = displayOf(options)
   let light = false
   let noColor = false
 
@@ -336,7 +343,10 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
+    // `display: status` or `off` leaves the band to others; `off` also keeps the
+    // status entry clear. The guard, keepwarm and /cache-tax work in every mode.
+    s.hasBand = s.display === 'band' && (e.surface === 'terminal' || e.surface === 'desktop')
+    if (s.display === 'off') $.ui.status(undefined)
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')
