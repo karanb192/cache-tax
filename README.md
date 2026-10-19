@@ -38,9 +38,9 @@ In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a s
 
 **When you return cold:** for a context of at least 50,000 tokens, the guard drops your ordinary message once when its one-hour clock says cold. It shows the estimated rewrite price. Resend to continue, or `/clear` and start from a note. A prompt no person sent, such as a background task's notification, a scheduled prompt or another session's message, is sent with the price logged, because nobody is there to resend it. Anything a person may have sent keeps the guard, including Remote Control, Slack and channel messages, SDK hosts and prompts Claude Code cannot classify.
 
-A detected cold write automatically arms at least three hours of keepwarm. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
+A detected cold write automatically arms at least three hours of keepwarm, six with `always` on, and prints what it cost. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
 
-Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns opens a fresh six-hour window at the default period, so any break up to six hours stays warm however long the session runs. The same turn brings back a window that stopped and replaces a shorter window or a testing period. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
+Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns that reaches the cache leaves at least six hours of window at the default period, so any break up to six hours stays warm however long the session runs. The same turn brings back a window that stopped, stretches a shorter one to six hours and resets a testing period; a longer window you set stays. `/keepwarm off` in any session stops every session rolling from its next turn. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
 
 ### A recorded warming ping
 
@@ -144,7 +144,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [125 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [132 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, warn mode, slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.

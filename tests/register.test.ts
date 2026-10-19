@@ -584,7 +584,7 @@ describe('keepwarm', () => {
     const card = await $.command.run(run('cache-tax', ''))
     expect(card.text).toMatch(/keepwarm    on, 5h10m left · ping in 50m · last ping read 200k \$0\.05 \(always\)/)
     const off = await $.command.run(run('keepwarm', 'off'))
-    expect(off.text).toBe('keepwarm is off, and no longer arms itself at session start')
+    expect(off.text).toBe('keepwarm is off, and always is off for every session from its next turn')
     expect(store.has('always')).toBe(false)
     expect(w.status.at(-1)).toBe(undefined)
   })
@@ -1626,6 +1626,116 @@ describe('/keepwarm off during a rolling turn', () => {
     expect(store.has('always')).toBe(false)
     expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
     await clock.advance(2 * HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+})
+
+describe('always, from the PR review', () => {
+  const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+  const alwaysOn = () => new Map<string, unknown>([['always', true]])
+
+  test('a longer window is kept, with its testing period reset to 50m', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = alwaysOn()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const r = await $.command.run(run('keepwarm', '48h every 2m'))
+    expect(r.text).toMatch(/Always is on, so your next turn makes it at least 6h00m at one ping per 50m$/)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 48 * HOUR)
+    expect(store.has('every:S1')).toBe(false)
+  })
+
+  test('a 48h window without a testing period is untouched by a turn', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = alwaysOn()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '48h'))
+    await clock.advance(HOUR)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 48 * HOUR)
+  })
+
+  test('a turn that failed before any response does not open a window over a cold cache', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = alwaysOn()
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    // Back after the six-hour window ended; the first request fails for good, with no usage.
+    await clock.advance(7 * HOUR)
+    const before = w.forks.length
+    await $.turn.complete(turn({ usage: undefined }))
+    expect(store.has('deadline:S1')).toBe(false)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(before)
+  })
+
+  test('the cold-write receipt prints with always on, and the guard promises six hours', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { store: alwaysOn() })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 6h00m\./)
+    await $.prompt.submit(prompt('hi'))
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
+  })
+
+  test('without always the receipt still offers three hours', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 3h00m\./)
+    await $.prompt.submit(prompt('hi'))
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect(w.logs.at(-1)).toMatch(/^cold write of 200k tokens paid \(\$4\.00\)\. Keeping the cache warm for 3h00m/)
+  })
+
+  test('/keepwarm off in another session stops this one rolling at its next turn', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = alwaysOn()
+    world(on, [], { store })
+    await $.session.start(session)
+    // Another session ran /keepwarm off: the shared switch is gone from the store.
+    store.delete('always')
+    await clock.advance(5 * HOUR)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 6 * HOUR)
+  })
+
+  test('/keepwarm off that lands while the roll reads the clock wins', async ($, on) => {
+    let now = START
+    let skip = -1
+    let release = () => {}
+    on('clock.now', async () => {
+      if (skip === 0) {
+        skip = -1
+        await new Promise<void>(r => { release = r })
+      } else if (skip > 0) skip--
+      return { value: now }
+    })
+    on('clock.after', () => new Promise<{ value: void }>(() => {}))
+    const store = alwaysOn()
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    now += 10 * MIN
+    // The finishing turn reads the clock once, then the roll reads it again: hold that second read.
+    skip = 1
+    const finishing = $.turn.complete(turn())
+    await settle()
+    expect((await $.command.run(run('keepwarm', 'off'))).text).toMatch(/^keepwarm is off/)
+    release()
+    await finishing
+    await settle()
+    expect(store.has('deadline:S1')).toBe(false)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
     expect(w.forks.length).toBe(0)
   })
 })
