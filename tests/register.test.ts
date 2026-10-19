@@ -35,10 +35,11 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string | (() => string); model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string | (() => string); model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   if (opts.store) {
     const store = opts.store
-    on('store.get', ($, e) => ({ value: store.get(e.key) }))
+    // A read takes its value first and is delivered after the gate, as a reply can arrive late.
+    on('store.get', async ($, e) => { const value = store.get(e.key); await opts.storeGate?.('get', e.key); return { value } })
     on('store.set', async ($, e) => { await opts.storeGate?.('set', e.key); store.set(e.key, e.value); return { value: undefined } })
     on('store.delete', async ($, e) => { await opts.storeGate?.('delete', e.key); store.delete(e.key); return { value: undefined } })
     on('store.keys', () => ({ value: [...store.keys()] }))
@@ -1604,7 +1605,7 @@ describe('/keepwarm off during a rolling turn', () => {
     const store = new Map<string, unknown>([['always', true]])
     let holdEveryDelete = false
     let release = () => {}
-    const storeGate = async (op: 'set' | 'delete', key: string) => {
+    const storeGate = async (op: 'get' | 'set' | 'delete', key: string) => {
       if (holdEveryDelete && op === 'delete' && key === 'every:S1') {
         holdEveryDelete = false
         await new Promise<void>(r => { release = r })
@@ -1737,5 +1738,79 @@ describe('always, from the PR review', () => {
     expect(store.has('deadline:S1')).toBe(false)
     expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
     expect(w.forks.length).toBe(0)
+  })
+})
+
+describe('the shared always switch across a turn', () => {
+  const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+  const holdOnce = (op: 'get' | 'set' | 'delete', key: string) => {
+    let armed = false
+    let release = () => {}
+    const gate = async (o: 'get' | 'set' | 'delete', k: string) => {
+      if (armed && o === op && k === key) {
+        armed = false
+        await new Promise<void>(r => { release = r })
+      }
+    }
+    return { gate, arm: () => { armed = true }, release: () => release() }
+  }
+
+  test('/keepwarm off while the turn reads the switch is not undone by the old value', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    const h = holdOnce('get', 'always')
+    const w = world(on, [warm], { store, storeGate: h.gate })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(10 * MIN)
+    h.arm()
+    const finishing = $.turn.complete(turn())
+    await settle()
+    await $.command.run(run('keepwarm', 'off'))
+    h.release()
+    await finishing
+    await settle()
+    expect(store.has('deadline:S1')).toBe(false)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+    await clock.advance(2 * HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('/keepwarm off during a cold-writing turn also stops its three-hour auto-warm', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    const h = holdOnce('get', 'always')
+    const w = world(on, [warm], { store, storeGate: h.gate })
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard warn'))
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    const before = w.forks.length
+    h.arm()
+    const finishing = $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    await settle()
+    await $.command.run(run('keepwarm', 'off'))
+    h.release()
+    await finishing
+    await settle()
+    expect(store.has('deadline:S1')).toBe(false)
+    expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
+    await clock.advance(2 * HOUR)
+    expect(w.forks.length).toBe(before)
+  })
+
+  test('always turned back on in another session reaches a session that saw it off', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    world(on, [], { store })
+    await $.session.start(session)
+    store.delete('always')
+    await clock.advance(HOUR)
+    await $.turn.complete(turn())
+    expect((await $.command.run(run('cache-tax', ''))).text).not.toMatch(/\(always\)/)
+    store.set('always', true)
+    await clock.advance(HOUR)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 8 * HOUR)
   })
 })

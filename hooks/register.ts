@@ -356,9 +356,10 @@ function armedText(s: State, now: number, windowMs: number): string {
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written`
 }
 
-async function startWindow($: EngineInterface, s: State, windowMs: number, every: number) {
-  // A /keepwarm off that lands while this awaits wins: the window it cancelled is not written back.
-  const offs = s.offs
+// A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
+// before deciding to open a window passes the count it read first.
+async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs) {
+  if (s.offs !== offs) return
   const now = await $.clock.now()
   if (s.offs !== offs) return
   const deadline = now + windowMs
@@ -605,6 +606,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) return r
+    // An off at any point in this turn wins over every window the turn would open.
+    const offs = s.offs
     const now = await $.clock.now()
     // A sleeping host may deliver this turn before the expired window's timer.
     if (s.deadline && now >= s.deadline) await stop($, s, null)
@@ -616,11 +619,12 @@ export const register: Register = on => {
     s.ackedAt = 0
     // Always covers any break up to six hours after a turn that reached the cache (a turn that failed before any
     // response touched nothing, and its cache may be cold): a window of at least six hours at the default period,
-    // which brings back a stopped window and replaces a shorter one or a testing period. /keepwarm off in another
-    // session clears the shared switch, so it is read again here.
-    if (s.always && e.usage) {
-      s.always = (await $.store.get(KEY_ALWAYS)) === true
-      if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS)
+    // which brings back a stopped window and replaces a shorter one or a testing period. Another session's
+    // /keepwarm off or /keepwarm always changes the shared switch, so every such turn reads it.
+    if (e.usage) {
+      const shared = (await $.store.get(KEY_ALWAYS)) === true
+      if (s.offs === offs) s.always = shared
+      if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS, offs)
     }
     const u = e.usage
     if (u) {
@@ -638,8 +642,8 @@ export const register: Register = on => {
         const price = priceOf(s.lastModel, prev || s.ctx)
         const usd = s.stepWrites?.priced ? s.stepWrites.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
-        const extend = s.deadline < now + AUTO_WARM_MS
-        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every)
+        const extend = s.deadline < now + AUTO_WARM_MS && s.offs === offs
+        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
       }
