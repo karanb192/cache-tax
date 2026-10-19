@@ -1814,3 +1814,38 @@ describe('the shared always switch across a turn', () => {
     expect(store.get('deadline:S1')).toBe(START + 8 * HOUR)
   })
 })
+
+describe('/keepwarm off while a turn is running', () => {
+  test('a cold write landing after the off does not reopen three hours', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/^cache-tax:/)
+    await $.prompt.submit(prompt('hi'))
+    // The paid resend's request is out when /keepwarm off runs, and its turn finishes after.
+    for await (const c of $.turn.step({ turnId: 'comeback', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await $.command.run(run('keepwarm', 'off'))
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect(store.has('deadline:S1')).toBe(false)
+    expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
+    await clock.advance(2 * HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('without an off the same cold write still arms three hours', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await $.prompt.submit(prompt('hi'))
+    for await (const c of $.turn.step({ turnId: 'comeback', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect(store.get('deadline:S1')).toBe(START + 2 * HOUR + 3 * HOUR)
+  })
+})

@@ -74,6 +74,7 @@ export type State = {
   gen: number
   tick: number
   offs: number
+  turnOffs: number | null
   inFlight: boolean
   stepWrites: { usd: number; priced: boolean } | null
 }
@@ -404,7 +405,7 @@ export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, inFlight: false, stepWrites: null,
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null,
   }
 }
 
@@ -591,7 +592,11 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) s.lastRequestAt = await $.clock.now()
+    if (!e.agentId) {
+      // The off count when the turn's first request went out: an off after it wins over what the turn opens.
+      if (e.index === 0) s.turnOffs = s.offs
+      s.lastRequestAt = await $.clock.now()
+    }
     const r = yield* next(e)
     // Each request's write is priced at its own prompt length's tier (Haiku 5.5 changes price at 100k), not the turn's sum.
     const u = r.usage
@@ -606,8 +611,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) return r
-    // An off at any point in this turn wins over every window the turn would open.
-    const offs = s.offs
+    // An off at any point in this turn wins over every window the turn would open; a host that raised no
+    // step falls back to the count at completion.
+    const offs = s.turnOffs ?? s.offs
+    s.turnOffs = null
     const now = await $.clock.now()
     // A sleeping host may deliver this turn before the expired window's timer.
     if (s.deadline && now >= s.deadline) await stop($, s, null)
