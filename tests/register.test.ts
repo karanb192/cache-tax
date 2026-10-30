@@ -98,6 +98,69 @@ const bandProps: RenderPropsOf['AbovePrompt'] = {
 }
 
 describe('cache indicator', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: idle countdown refreshes without commands or extra pings`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm])
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '6h'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(11 * MIN)
+      expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/keepwarm 5h49m left · ping in 39m/)
+      expect(w.forks.length).toBe(0)
+      await clock.advance(39 * MIN)
+      expect(w.forks.length).toBe(1)
+      await clock.advance(MIN)
+      expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/keepwarm 5h09m left · ping in 49m · last ping read 200k/)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  test('the plain status countdown refreshes while idle and stops with its window', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    const afterArming = w.status.length
+    await clock.advance(11 * MIN)
+    expect(w.status.length - afterArming).toBe(11)
+    expect(w.status.at(-1)).toBe('keepwarm 5h49m left · ping in 39m')
+    await $.command.run(run('keepwarm', 'off'))
+    const afterOff = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterOff)
+    await $.command.run(run('keepwarm', '2m'))
+    await clock.advance(MIN)
+    expect(w.status.at(-1)).toBe('keepwarm 1m left · ping in 36m')
+    await clock.advance(MIN)
+    expect(w.status.at(-1)).toBe(undefined)
+    const afterExpiry = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterExpiry)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.classic.SessionStart({ source: 'clear' })
+    const afterClear = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterClear)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('refreshing during API backoff preserves the retry delay', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [busy, busy, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(52 * MIN)
+    expect(w.status.at(-1)).toBe('keepwarm 5h08m left · API busy, ping retry 2 of 3')
+    expect(w.forks.length).toBe(2)
+    await clock.advance(MIN)
+    expect(w.forks.length).toBe(3)
+    expect(w.status.at(-1)).toMatch(/ping in 50m · last ping read 200k/)
+  })
+
   test('redraws reuse session preferences and theme changes repaint immediately', async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
@@ -1087,7 +1150,7 @@ describe('stale and late ping results', () => {
     await settle()
     await clock.advance(5 * MIN)
     expect(w.forks.length).toBe(1)
-    expect(w.status.at(-1)).toBe('keepwarm 2h10m left · waiting for the first turn after compaction')
+    expect(w.status.at(-1)).toBe('keepwarm 2h05m left · waiting for the first turn after compaction')
   })
 
   test('a 429 that lands after /clear with always on leaves the new window alone', async ($, on) => {
