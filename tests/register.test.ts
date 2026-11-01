@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { fmtDuration, freshState, HANDOFF_PROMPT, parseDuration, PING_PROMPT, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void>; files?: Map<string, string>; denyWrite?: boolean } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -52,6 +52,17 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   })
   on('config.set', ($, e) => opts.denyTheme ? { deny: 'theme locked' } : { value: opts.writtenTheme ?? e.value })
   const forks: number[] = []
+  const prompts: string[] = []
+  const files = opts.files ?? new Map<string, string>()
+  // The harness resolves a relative path against the working directory before the stub sees it.
+  const rel = (path: string) => path.replace(/^.*?(?=\.claude\/plans\/)/, '')
+  on('fs.exists', ($, e) => ({ value: files.has(rel(e.path)) }))
+  on('fs.read', ($, e) => ({ value: files.get(rel(e.path)) ?? '' }))
+  on('fs.write', ($, e) => {
+    if (opts.denyWrite) return { deny: 'writes blocked' }
+    files.set(rel(e.path), e.text)
+    return { value: undefined }
+  })
   const status: Array<string | undefined> = []
   const logs: string[] = []
   const entered: string[] = []
@@ -74,8 +85,9 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: [opts.bandText ?? ''] }))
-  on('model.fork', async () => {
+  on('model.fork', async ($, e) => {
     forks.push(forks.length)
+    prompts.push(e.prompt)
     if (opts.gate) await opts.gate()
     const a = forkAnswers.shift()
     // Older Claude Code releases returned null instead of a failure object.
@@ -84,7 +96,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads }
+  return { forks, prompts, files, status, logs, entered, reads }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -2282,5 +2294,161 @@ describe('a managed plugin above the user tier', () => {
     expect(w.logs).toEqual([])
     expect(w.status.at(-1)).toBe(undefined)
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+  })
+})
+
+describe('handoff on the final ping', () => {
+  const realTimer = globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }
+  const settle = () => new Promise<void>(r => { realTimer.setTimeout(r, 20) })
+  const SUMMARY = '## Goal\nShip the handoff.'
+  const summary = (read: number, write: number): ForkAnswer => ({ isAnswered: true, text: SUMMARY, usage: { input_tokens: 2, output_tokens: 300, cache_read_input_tokens: read, cache_creation_input_tokens: write } })
+  const OURS = '<!-- cache-tax handoff -->'
+
+  test('without handoff the final ping sends the plain ping and writes nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '1h'))
+    await clock.advance(50 * MIN)
+    expect(w.prompts).toEqual([PING_PROMPT])
+    expect(w.files.size).toBe(0)
+  })
+
+  test('only the last ping of the window carries the summary prompt, and its reply is written once', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, summary(200000, 400)])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 2h'))
+    await clock.advance(50 * MIN)
+    expect(w.prompts).toEqual([PING_PROMPT])
+    expect(w.files.size).toBe(0)
+    await clock.advance(50 * MIN)
+    expect(w.prompts).toEqual([PING_PROMPT, HANDOFF_PROMPT])
+    expect([...w.files.keys()]).toEqual(['.claude/plans/HANDOFF.md'])
+    const file = w.files.get('.claude/plans/HANDOFF.md') ?? ''
+    expect(file.split('\n')[0]).toBe(OURS)
+    expect(file).toMatch(/session S1/)
+    expect(file).toMatch(/not instructions/)
+    expect(file.endsWith(SUMMARY)).toBe(true)
+    expect(w.logs.some(l => l.includes('.claude/plans/HANDOFF.md'))).toBe(true)
+    await clock.advance(HOUR)
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('a hand-written HANDOFF.md is never overwritten', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const files = new Map([['.claude/plans/HANDOFF.md', '# my own notes']])
+    const w = world(on, [summary(200000, 400)], { files })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(files.get('.claude/plans/HANDOFF.md')).toBe('# my own notes')
+    const written = [...files.keys()].filter(k => k !== '.claude/plans/HANDOFF.md')
+    expect(written).toHaveLength(1)
+    expect(written[0]).toMatch(/^\.claude\/plans\/HANDOFF-\d{8}-\d{4}\.md$/)
+    expect(files.get(written[0])?.split('\n')[0]).toBe(OURS)
+  })
+
+  test('its own earlier handoff is replaced in place', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const files = new Map([['.claude/plans/HANDOFF.md', OURS + '\nold']])
+    const w = world(on, [summary(200000, 400)], { files })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(files.size).toBe(1)
+    expect(files.get('.claude/plans/HANDOFF.md')).toMatch(/Ship the handoff/)
+    expect(w.prompts).toEqual([HANDOFF_PROMPT])
+  })
+
+  test('a turn that lands while the summary is out drops it without a write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let release = () => {}
+    const w = world(on, [summary(200000, 400)], { gate: () => new Promise<void>(r => { release = r }) })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn())
+    release()
+    await settle()
+    expect(w.files.size).toBe(0)
+  })
+
+  test('a cold final ping writes nothing and stops the window as before', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [summary(0, 200000)])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(w.files.size).toBe(0)
+    expect(w.status.at(-1)).toMatch(/stopped.*cache was already gone/)
+  })
+
+  test('a small context whose summary write passes a tenth of the read still counts as warm', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [summary(5000, 1000)])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(w.files.size).toBe(1)
+    expect(w.status.at(-1)).toMatch(/^keepwarm .* left/)
+  })
+
+  test('a refused write is explained and the window carries on', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [summary(200000, 400)], { denyWrite: true })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'handoff 1h'))
+    await clock.advance(50 * MIN)
+    expect(w.files.size).toBe(0)
+    expect(w.logs.some(l => /handoff/.test(l) && /writes blocked/.test(l))).toBe(true)
+    expect(w.status.at(-1)).toMatch(/^keepwarm .* left/)
+  })
+
+  test('the command arms the flag, a plain window and off clear it', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    expect((await $.command.run(run('keepwarm', 'handoff'))).text).toMatch(/keepwarm on for 6h00m/)
+    expect(store.get('handoff:S1')).toBe(true)
+    expect((await $.command.run(run('keepwarm', 'handoff 30m'))).text).toMatch(/longer than 50m/)
+    await $.command.run(run('keepwarm', '1h'))
+    expect(store.has('handoff:S1')).toBe(false)
+    await clock.advance(50 * MIN)
+    expect(w.prompts).toEqual([PING_PROMPT])
+    await $.command.run(run('keepwarm', 'handoff 2h'))
+    expect(store.get('handoff:S1')).toBe(true)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(store.has('handoff:S1')).toBe(false)
+  })
+
+  test('a saved handoff window survives a restart', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:S1', START + HOUR], ['handoff:S1', true]])
+    const w = world(on, [summary(200000, 400)], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.prompts).toEqual([HANDOFF_PROMPT])
+    expect(w.files.size).toBe(1)
+  })
+
+  test('a dead window takes its handoff flag with it', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:S1', START - MIN], ['handoff:S1', true]])
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.has('handoff:S1')).toBe(false)
   })
 })
