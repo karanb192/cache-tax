@@ -2284,3 +2284,115 @@ describe('a managed plugin above the user tier', () => {
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
   })
 })
+
+describe('always with a window of its own', () => {
+  const always24h = () => new Map<string, unknown>([['always', 24 * HOUR]])
+
+  test('/keepwarm always 24h stores the window and arms it now', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    const r = await $.command.run(run('keepwarm', 'always 24h'))
+    expect(r.text).toMatch(/^keepwarm always on: every session stays warm until 24h00m after its last turn/)
+    expect(store.get('always')).toBe(24 * HOUR)
+    expect(store.get('deadline:S1')).toBe(START + 24 * HOUR)
+    expect(w.status.at(-1)).toBe('keepwarm 24h00m left · waiting for the first turn')
+  })
+
+  test('a stored window arms every session start at its own length', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = always24h()
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 24 * HOUR)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/keepwarm    on, 24h00m left .*\(always\)/)
+  })
+
+  test('each turn rolls the window to at least the stored length', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = always24h()
+    const w = world(on, [warm, warm], { store })
+    await $.session.start(session)
+    await clock.advance(20 * HOUR)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 44 * HOUR)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('a break longer than six hours stays warm', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = always24h()
+    const w = world(on, Array(30).fill(warm), { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(12 * HOUR)
+    // Fourteen pings in twelve hours: a six-hour window would have stopped after seven.
+    expect(w.forks.length).toBe(14)
+    expect(store.get('deadline:S1')).toBe(START + 24 * HOUR)
+  })
+
+  test('/clear arms the new conversation at the stored length', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = always24h()
+    let sid = 'S1'
+    world(on, [warm], { store, sid: () => sid })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear' })
+    expect(store.get('deadline:S2')).toBe(START + 24 * HOUR)
+  })
+
+  test('bare /keepwarm always goes back to six hours', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = always24h()
+    world(on, [], { store })
+    await $.session.start(session)
+    const r = await $.command.run(run('keepwarm', 'always'))
+    expect(r.text).toMatch(/until 6h00m after its last turn/)
+    expect(store.get('always')).toBe(true)
+  })
+
+  test('the guard promises the stored length', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { store: always24h() })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 24h00m\./)
+  })
+
+  test('off forgets the stored window', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = always24h()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(store.has('always')).toBe(false)
+  })
+
+  for (const args of ['always 30m', 'always 169h', 'always banana', 'always 0h', 'always 24h every 2m', 'always 24h 6h']) {
+    test(`/keepwarm ${args} is refused and changes nothing`, async ($, on) => {
+      mock.clock(on, { now: START })
+      const store = new Map<string, unknown>()
+      world(on, [], { store })
+      await $.session.start(session)
+      const r = await $.command.run(run('keepwarm', args))
+      expect(r.text).toBe('always takes one window from 1h to 168h, such as always 24h')
+      expect(store.has('always')).toBe(false)
+      expect(store.has('deadline:S1')).toBe(false)
+    })
+  }
+
+  for (const value of ['24h', 0, -HOUR, 30 * MIN, 200 * HOUR, Infinity, NaN]) {
+    test(`a stored always of ${String(value)} is not a window, so keepwarm stays off`, async ($, on) => {
+      mock.clock(on, { now: START })
+      const store = new Map<string, unknown>([['always', value]])
+      world(on, [], { store })
+      await $.session.start(session)
+      expect(store.has('deadline:S1')).toBe(false)
+    })
+  }
+})
