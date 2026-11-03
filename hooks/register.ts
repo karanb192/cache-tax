@@ -682,9 +682,10 @@ export const register: Register = on => {
     const unattended = UNATTENDED.has(e.origin.kind)
     // A model with no price row has no estimate to compare, so the floor never lets it through.
     const usd = coldUsd(s)
-    const under = s.guard !== 'warn' && usd != null && usd < s.guard
-    if (s.guard === 'warn' || unattended || under) {
-      const why = unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(s.guard)} floor` : ''
+    const guard = s.guard
+    const under = guard !== 'warn' && usd != null && usd < guard
+    if (guard === 'warn' || unattended || under) {
+      const why = unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
       $.ui.log(`${guardText(s, now)} Sending anyway${why}; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
       s.coldWritePending = true
       return next(e)
