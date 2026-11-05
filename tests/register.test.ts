@@ -2780,15 +2780,39 @@ describe('the Auto keepwarm option', () => {
     expect(asked[0].question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Send it anyway\?$/)
   })
 
-  test('off: /keepwarm still arms, and always still holds after a paid cold write', off, async ($, on) => {
+  test('off: a window armed by hand is promised until its deadline, and keeps pinging after a paid cold write', off, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm, warm, warm])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    await $.command.run(run('keepwarm', '90m'))
+    await clock.advance(20 * MIN)
+    const forks = w.forks.length
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm holds the cache for 1h10m at about/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
+    expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm/)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(forks + 1)
+  })
+
+  test('off: always still renews for six hours after a paid cold write and keeps pinging', off, async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [warm, warm, warm, warm, warm, warm, warm, warm])
     await $.session.start(session)
     await $.turn.complete(turn())
-    expect((await $.command.run(run('keepwarm', 'always'))).text).toMatch(/keepwarm/)
-    await clock.advance(7 * HOUR)
+    await $.command.run(run('keepwarm', 'always'))
     await $.command.run(run('cache-tax', 'guard warn'))
+    await clock.advance(7 * HOUR)
     await $.prompt.submit(prompt('hi'))
     expect(w.logs.at(-1)).toMatch(/Sending anyway; keepwarm will hold the cache for 6h00m once it lands/)
+    const forks = w.forks.length
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.status.at(-1)).toMatch(/^keepwarm 6h00m left/)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(forks + 1)
   })
 })
