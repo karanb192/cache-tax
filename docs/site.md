@@ -11,7 +11,7 @@ The site is prepared for `cachetax.aidojo.si`. At cutover:
 3. Wait for the Pages certificate, enable HTTPS enforcement and verify the page and `/assets/social-1280x640.png` over HTTPS.
 4. Update the repository's About website URL.
 
-The previous address, `cache-tax.karanbansal.in`, is not redirected by this PR. GitHub Pages accepts one custom domain per repository. To preserve old links, arrange a redirect for the previous hostname with the DNS/hosting provider or a separate redirect site.
+The previous address, `cache-tax.karanbansal.in`, redirects permanently (301) to `cachetax.aidojo.si`, keeping the path. GitHub Pages accepts one custom domain per repository, so the redirect lives on the karanbansal.in host instead, as a Hostinger subdomain whose `.htaccess` sends every request on.
 
 ## Local preview and social image
 
