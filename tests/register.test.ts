@@ -1239,6 +1239,115 @@ describe('ping failures', () => {
     expect(w.status.at(-1)).toMatch(/ping in 50m · last ping read 200k/)
   })
 
+  // The transcript's last response never includes a ping, so a restarted process would rebuild the cache clock from
+  // the last real turn: a cache a ping kept warm reads as cold, and keepwarm stops pinging it.
+  const pinged = { at: START + 50 * MIN, read: 200000, write: 0, usd: 0.05, warm: true }
+
+  test('a warm ping is stored for the next process', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [warm], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(store.get('ping:S1')).toMatchObject({ at: START + 50 * MIN, read: 200000, write: 0, warm: true })
+  })
+
+  test('after a restart, a cache a stored ping kept warm is pinged, not reported cold', async ($, on) => {
+    // The process went away 40m after the ping and is back now; the transcript's last response is 90m old.
+    const clock = mock.clock(on, { now: START + 90 * MIN })
+    const store = new Map<string, unknown>([['deadline:S1', START + 6 * HOUR], ['ping:S1', pinged]])
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 90 * 60, context_tokens: 200000 })
+    expect(w.status.at(-1)).toBe('keepwarm 4h30m left · ping in 10m · last ping read 200k $0.05')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state {7}warm, 20m left/)
+    await clock.advance(10 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(store.get('ping:S1')).toMatchObject({ at: START + 100 * MIN, warm: true })
+    expect(w.status.at(-1)).toMatch(/ping in 50m · last ping read 200k/)
+  })
+
+  test('after a restart, the guard does not ask about a cache a stored ping kept warm', async ($, on) => {
+    mock.clock(on, { now: START + 90 * MIN })
+    const store = new Map<string, unknown>([['deadline:S1', START + 6 * HOUR], ['ping:S1', pinged]])
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 90 * 60, context_tokens: 200000, prompt_cache_likely_expired: true })
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+  })
+
+  test('after a restart, a cache that went cold since the stored ping is still not pinged', async ($, on) => {
+    // Back 70m after the last ping: the cache is gone whatever the store says.
+    const clock = mock.clock(on, { now: START + 120 * MIN })
+    const store = new Map<string, unknown>([['deadline:S1', START + 6 * HOUR], ['ping:S1', pinged]])
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 120 * 60, context_tokens: 200000 })
+    expect(w.status.at(-1)).toMatch(/cold now, first ping 50m after the next turn/)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state {7}COLD, last request 1h10m ago/)
+    await clock.advance(3 * HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('a stored ping older than the transcript\'s last response does not move the clock back', async ($, on) => {
+    const clock = mock.clock(on, { now: START + 90 * MIN })
+    const store = new Map<string, unknown>([['deadline:S1', START + 6 * HOUR], ['ping:S1', pinged]])
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 20 * 60, context_tokens: 200000 })
+    expect(w.status.at(-1)).toMatch(/ping in 30m/)
+    await clock.advance(29 * MIN)
+    expect(w.forks.length).toBe(0)
+    await clock.advance(MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('another session\'s stored ping is not used', async ($, on) => {
+    mock.clock(on, { now: START + 90 * MIN })
+    const store = new Map<string, unknown>([['deadline:S1', START + 6 * HOUR], ['ping:other', pinged]])
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 90 * 60, context_tokens: 200000 })
+    expect(w.status.at(-1)).toMatch(/cold now/)
+    expect(store.get('ping:other')).toEqual(pinged)
+  })
+
+  test('/keepwarm off and a dead window forget the stored ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:old', START - HOUR], ['ping:old', pinged]])
+    world(on, [warm], { store, sid: 'old' })
+    await $.session.start(session)
+    expect(store.has('ping:old')).toBe(false)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(store.has('ping:old')).toBe(true)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(store.has('ping:old')).toBe(false)
+  })
+
+  test('a ping that lands while /keepwarm off runs leaves no stored ping behind', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    let release = () => {}
+    let held = false
+    world(on, [warm], { store, storeGate: async (op, key) => {
+      if (op === 'set' && key === 'ping:S1' && !held) { held = true; await new Promise<void>(r => { release = r }) }
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(held).toBe(true)
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await clock.advance(MIN)
+    expect(store.has('ping:S1')).toBe(false)
+  })
+
   for (const status of [429, 529, 500, null]) {
     test(`an API error ${status} is retried and the loop goes on once a ping lands`, async ($, on) => {
       const clock = mock.clock(on, { now: START })

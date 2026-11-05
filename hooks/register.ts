@@ -16,6 +16,9 @@ const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ACKED = 'acked'
+// The last warm ping of a session's window. A transcript's last response never includes a ping, so without this a
+// restarted process rebuilds the cache clock from the last real turn and reads a cache a ping kept warm as cold.
+const KEY_PING = 'ping'
 // The stored refusal names the last response, which a resumed process rebuilds from whole seconds and the running one
 // stamps at turn.complete: the same moment, matched within this. Request times differ by the response's own length.
 const ACK_SLACK_MS = 60 * 1000
@@ -348,6 +351,25 @@ function ackedKey(s: State): string {
   return `${KEY_ACKED}:${s.sid}`
 }
 
+function pingKey(s: State): string {
+  return `${KEY_PING}:${s.sid}`
+}
+
+/** A ping record as stored: anything else, such as a value another version wrote, is ignored. */
+function storedPing(value: unknown): PingRecord | null {
+  if (!value || typeof value !== 'object') return null
+  const v = value as Record<string, unknown>
+  if (typeof v.at !== 'number' || v.warm !== true || typeof v.read !== 'number' || typeof v.write !== 'number') return null
+  return { at: v.at, read: v.read, write: v.write, usd: typeof v.usd === 'number' ? v.usd : null, warm: true }
+}
+
+/** A resumed process's cache clock: the later of the transcript's last response and the last warm ping stored for this session. */
+function applyStoredPing(s: State, record: PingRecord | null, now: number) {
+  if (!record || !s.lastRequestAt || s.compacted || record.at > now) return
+  if (record.at > s.lastRequestAt) s.lastRequestAt = record.at
+  if (!s.last) s.last = record
+}
+
 /** Clears this session's own dead window and the bare keys a store written before 2.1.1 still holds. Other sessions' keys are never touched: a read followed by a delete cannot be made atomic against their renewal. */
 async function prune($: EngineInterface, s: State, now: number) {
   for (const key of [KEY_DEADLINE, deadlineKey(s)]) {
@@ -356,6 +378,7 @@ async function prune($: EngineInterface, s: State, now: number) {
     if (typeof deadline === 'number' && deadline > now) continue
     await $.store.delete(key)
     await $.store.delete(KEY_EVERY + key.slice(KEY_DEADLINE.length))
+    await $.store.delete(KEY_PING + key.slice(KEY_DEADLINE.length))
   }
 }
 
@@ -373,6 +396,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
   disarm(s)
   await $.store.delete(deadlineKey(s))
   await $.store.delete(everyKey(s))
+  await $.store.delete(pingKey(s))
   if (forgetAlways) await $.store.delete(KEY_ALWAYS)
   updateStatus($, s, await $.clock.now())
 }
@@ -381,7 +405,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
 async function endConversation($: EngineInterface, s: State, reason: 'clear' | 'resume') {
   // Claimed before any await: a second end or a classic start for the same conversation finds it already gone, and an
   // end cut short by its budget leaves no timer and no old id behind, only the keys below.
-  const keys = [deadlineKey(s), everyKey(s), ackedKey(s)]
+  const keys = [deadlineKey(s), everyKey(s), ackedKey(s), pingKey(s)]
   const ending = s.sid
   resetForClear(s)
   s.sid = ''
@@ -514,6 +538,15 @@ async function ping($: EngineInterface, s: State) {
   s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
   s.lastRequestAt = now
+  // Kept for a process that restarts within the hour, which would otherwise read this cache as cold.
+  if (s.sid) {
+    const key = pingKey(s)
+    const record = s.last
+    await $.store.set(key, record)
+    // A stop, /clear or resume while the write was out already cleared this key: what this call wrote goes too.
+    if (gen !== s.gen && storedPing(await $.store.get(key))?.at === record.at) await $.store.delete(key)
+    if (gen !== s.gen) return s.pending ? undefined : arm($, s)
+  }
   await arm($, s)
 }
 
@@ -723,7 +756,11 @@ export const register: Register = (on, options) => {
     // No session.start fires after /clear, so this is where always arms the new conversation.
     await reseat($, s)
     if (e.source === 'clear') return r
-    const line = seedFromResume(s, e, await $.clock.now())
+    // Read before seeding, so nothing awaits between the transcript's clock and the ping that may move it on.
+    const stored = e.source === 'resume' && s.sid ? storedPing(await $.store.get(pingKey(s))) : null
+    const now = await $.clock.now()
+    const line = seedFromResume(s, e, now)
+    applyStoredPing(s, stored, now)
     if (line) $.ui.log(line)
     // The seeded clock decides whether a restored or always window pings before the first turn: never when it is cold.
     await arm($, s)
