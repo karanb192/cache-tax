@@ -739,11 +739,16 @@ export const register: Register = on => {
     // A prompt no person sent would be dropped by the question nobody answers, so the test waits for one a person sent.
     if (s.testOnce && !UNATTENDED.has(e.origin.kind)) {
       s.testOnce = false
+      const model = await $.session.model()
+      if (model) s.lastModel = model
       const sid = s.sid
       const send = sendLabel(s)
       const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s)} Send it anyway?`, send)
       if (s.sid !== sid) return { drop: MOVED_TEXT }
-      return answer === send ? next(e) : { drop: 'cache-tax test: not sent.' }
+      if (answer !== send) return { drop: 'cache-tax test: not sent.' }
+      // A test that lands on a cache that really is cold pays like any cold send, so it is scored like one.
+      if (isCold(s, now) && s.ctx >= BIG_TOKENS) s.coldWritePending = true
+      return next(e)
     }
     // Without the time of the last response nothing says whether the cache is cold: the price is shown once and the message goes through.
     if (s.resumedAt) {

@@ -2674,6 +2674,32 @@ describe('ask before a cold send', () => {
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
   })
 
+  test('guard test into a cold cache scores a partial rewrite as the cold write it is', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 160000, cache_creation_input_tokens: 40000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
+  })
+
+  test('guard test prices the send at the model selected now', async ($, on) => {
+    mock.clock(on, { now: START })
+    let model = 'claude-haiku-5-5'
+    world(on, [], { model: () => model })
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    model = 'claude-fable-5-1'
+    await $.command.run(run('cache-tax', 'guard test'))
+    await $.prompt.submit(prompt('hi'))
+    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+  })
+
   test('an answer that arrives after a resume moved the process sends, scores and stores nothing', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const store = new Map<string, unknown>()
