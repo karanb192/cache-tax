@@ -18,6 +18,9 @@ const KEY_ACKED = 'acked'
 // stamps at turn.complete: the same moment, matched within this. Request times differ by the response's own length.
 const ACK_SLACK_MS = 60 * 1000
 const KEY_ALWAYS = 'always'
+const KEEP_LABEL = "Don't send"
+const MOVED_TEXT = 'cache-tax: the conversation changed while the question was open, so this was not sent. Send it again.'
+const SEND_LABEL = 'Send anyway'
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
 // other origin, including sdk, unclassified and the owner's own Slack or channel
@@ -79,6 +82,8 @@ export type State = {
   statusRefresh: { cancel: () => void } | null
   last: PingRecord | null
   stopped: string | null
+  /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
+  testOnce: boolean
   waitForTurn: boolean
   retries: number
   retryReason: string
@@ -154,13 +159,39 @@ function isCold(s: State, now: number): boolean {
   return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= TTL_MS
 }
 
-function guardText(s: State, now: number): string {
+function costText(s: State): string {
   const price = priceOf(s.lastModel, s.ctx)
   const rate = price ? `$${price[1]}/MTok` : 'the cache-write rate'
   const warm = warmUsd(s)
-  return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago. Sending this re-writes ` +
-    `up to ${s.ctx.toLocaleString('en-US')} tokens at ${rate} = ${fmtUsd(coldUsd(s))}` +
+  return `Sending this re-writes up to ${s.ctx.toLocaleString('en-US')} tokens at ${rate} = ${fmtUsd(coldUsd(s))}` +
     (warm == null ? '' : ` (a warm turn would have cost ${fmtUsd(warm)})`) + '.'
+}
+
+function guardText(s: State, now: number): string {
+  return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago. ${costText(s)}`
+}
+
+/** What each answer saves. The dialog's options are bare labels, so the question carries it. */
+function saveText(s: State): string {
+  const cold = coldUsd(s)
+  const warm = warmUsd(s)
+  if (cold == null || warm == null) return `${KEEP_LABEL} pays nothing; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s))}.`
+  return `${KEEP_LABEL} saves ${fmtUsd(cold)}; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s))} ` +
+    `at about ${fmtUsd(warm)} a ping, so the next break does not cost ${fmtUsd(cold)} again.`
+}
+
+function sendLabel(s: State): string {
+  const cold = coldUsd(s)
+  return cold == null ? SEND_LABEL : `${SEND_LABEL} (${fmtUsd(cold)})`
+}
+
+/** Asks in the engine's own dialog, Send anyway first; null when it is dismissed or no one can be asked. */
+async function ask($: EngineInterface, question: string, send: string): Promise<string | null> {
+  try {
+    return await $.ui.ask(question, { header: 'Cache Tax', options: [send, KEEP_LABEL] })
+  } catch {
+    return null
+  }
 }
 
 export type ResumeFields = {
@@ -186,6 +217,7 @@ export function resetForClear(s: State) {
   s.waitForTurn = false
   s.stepWrites = null
   s.steps = 0
+  s.testOnce = false
   outdate(s)
   disarm(s)
 }
@@ -511,9 +543,9 @@ function card(s: State, now: number): string {
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
-  lines.push(`guard       ${s.guard === 'warn' ? 'warn only (/cache-tax guard refuse to be stopped once)'
-    : s.guard ? `refuse once at ${fmtUsd(s.guard)} or more, warn below (/cache-tax guard refuse to refuse any)`
-    : 'refuse once (/cache-tax guard warn to only show the price)'}`)
+  lines.push(`guard       ${s.guard === 'warn' ? 'warn only (/cache-tax guard refuse to be asked first)'
+    : s.guard ? `ask first at ${fmtUsd(s.guard)} or more, warn below (/cache-tax guard refuse to ask at any price)`
+    : 'ask first (/cache-tax guard warn to only show the price)'}`)
   const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
   lines.push(`session     ${s.misses.length} cold write${s.misses.length === 1 ? '' : 's'} paid, ${fmtUsd(paid)}`)
   return lines.join('\n')
@@ -523,7 +555,7 @@ export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
   }
 }
 
@@ -599,8 +631,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'cache-tax',
-      description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse (cache-tax, the Mod)',
-      argumentHint: '[status | guard warn | guard refuse [dollars]]',
+      description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse|test (cache-tax, the Mod)',
+      argumentHint: '[status | guard warn | guard refuse [dollars] | guard test]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -682,14 +714,18 @@ export const register: Register = on => {
     const words = String(e.args ?? '').trim().split(/\s+/).filter(Boolean)
     const now = await $.clock.now()
     if (words[0] === 'guard') {
+      if (words[1] === 'test' && !words[2]) {
+        s.testOnce = true
+        return { text: 'the next prompt you send asks as if the cache were cold, priced at this session\'s context; the test scores nothing, though a send into a cache that really is cold is scored as usual' }
+      }
       const floor = words[1] === 'refuse' && words[2] ? Number(words[2].replace(/^\$/, '')) : 0
       const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
-      if (!valid) return { text: '/cache-tax guard takes warn, refuse, or refuse with a dollar floor such as refuse 5' }
+      if (!valid) return { text: '/cache-tax guard takes warn, refuse, refuse with a dollar floor such as refuse 5, or test' }
       s.guard = words[1] === 'warn' ? 'warn' : floor
       await $.store.set(KEY_GUARD, s.guard || 'refuse')
       return { text: s.guard === 'warn' ? 'guard set to warn: a cold send goes through with its price shown'
-        : s.guard ? `guard set to refuse once at ${fmtUsd(s.guard)} or more: a cheaper cold send goes through with its price shown`
-        : 'guard set to refuse once: a cold send is dropped with its price, the resend goes through' }
+        : s.guard ? `guard set to ask at ${fmtUsd(s.guard)} or more: a cold send waits for ${SEND_LABEL} or ${KEEP_LABEL}, a cheaper one goes through with its price shown`
+        : `guard set to ask: a cold send waits for ${SEND_LABEL} or ${KEEP_LABEL}` }
     }
     return { text: card(s, now) }
   })
@@ -700,6 +736,20 @@ export const register: Register = on => {
     await reseat($, s)
     if (typeof e.text !== 'string' || e.text.trimStart().startsWith('/')) return next(e)
     const now = await $.clock.now()
+    // A prompt no person sent would be dropped by the question nobody answers, so the test waits for one a person sent.
+    if (s.testOnce && !UNATTENDED.has(e.origin.kind)) {
+      s.testOnce = false
+      const model = await $.session.model()
+      if (model) s.lastModel = model
+      const sid = s.sid
+      const send = sendLabel(s)
+      const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s)} Send it anyway?`, send)
+      if (s.sid !== sid) return { drop: MOVED_TEXT }
+      if (answer !== send) return { drop: 'cache-tax test: not sent.' }
+      // A test that lands on a cache that really is cold pays like any cold send, so it is scored like one.
+      if (isCold(s, now) && s.ctx >= BIG_TOKENS) s.coldWritePending = true
+      return next(e)
+    }
     // Without the time of the last response nothing says whether the cache is cold: the price is shown once and the message goes through.
     if (s.resumedAt) {
       const cold = mayBeCold(s, now)
@@ -731,6 +781,19 @@ export const register: Register = on => {
       s.coldWritePending = true
       return next(e)
     }
+    // Ask before the turn starts: the button lets this very prompt through, still the user's own.
+    const sid = s.sid
+    const send = sendLabel(s)
+    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s)} Send it anyway?`, send)
+    // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
+    // answer belongs to the old one: nothing is sent, scored or stored under the new id.
+    if (s.sid !== sid) return { drop: MOVED_TEXT }
+    if (answer === send) {
+      s.coldWritePending = true
+      return next(e)
+    }
+    if (answer !== null) return { drop: `cache-tax: not sent, nothing paid${usd == null ? '' : ` (${fmtUsd(usd)} saved)`}. Send it again to be asked again, or /clear and start from a note.` }
+    // No dialog to answer (dismissed, or a run with no one to ask): refuse once, the resend pays.
     s.ackedAt = s.lastRequestAt
     if (s.lastResponseAt) await $.store.set(ackedKey(s), s.lastResponseAt)
     return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(holdMs(s))}. Or /clear and start from a note.` }
