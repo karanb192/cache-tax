@@ -5,6 +5,7 @@ Thanks for helping. Cache Tax does two things: it keeps the prompt cache warm du
 ## Before you start
 
 - **Bug fix:** open the PR directly. Link the issue if there is one.
+- **Branch from current `main`.** If `main` moves while your PR is open, merge it in before asking for review. A PR built on an old release usually needs its changes redone by hand.
 - **New feature or behaviour change:** open an issue first and describe the case. It saves you from building something that will not fit.
 - **Out of scope for this mod:** writing files, sending prompts on your behalf, keeping prompt text, or calling the model for anything except a keepwarm ping. Those widen what the mod can reach (see [What it can reach](README.md#what-it-can-reach)). They may fit better as a separate mod that reads [`$.cacheTax.status()`](README.md#reading-the-state-from-another-mod).
 
@@ -29,10 +30,12 @@ claude plugin test .
 tsc -p .
 ```
 
-`tsc` needs the generated declarations in `.claude-plugin/types/`; keep them untracked. Paste the pass count from `claude plugin test .` into the PR.
+`tsc` needs the generated declarations in `.claude-plugin/types/`, which Claude Code writes when it loads the plugin from your checkout (`claude --plugin-dir .`); keep them untracked. Paste the pass count from `claude plugin test .` into the PR.
+
+The test kit can set the plugin's options for one test, so a `userConfig` option is testable end to end: `test('name', { options: { autoWarm: 'off' } }, async ($, on) => { ... })`.
 
 ## In the PR
 
-- Keep the title and description in step with the final diff.
+- Keep the title and description in step with the final diff. If a coding agent wrote the PR, read its description against the diff before you open it; the same evidence applies.
 - Update the README when behaviour, commands or [What it can reach](README.md#what-it-can-reach) change, including the test count.
 - Leave the version in `.claude-plugin/plugin.json` alone. It is set at release.
