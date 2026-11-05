@@ -172,11 +172,12 @@ function guardText(s: State, now: number): string {
 }
 
 /** What each answer saves. The dialog's options are bare labels, so the question carries it. */
-function saveText(s: State): string {
+function saveText(s: State, now: number): string {
   const cold = coldUsd(s)
   const warm = warmUsd(s)
-  if (cold == null || warm == null) return `${KEEP_LABEL} pays nothing; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s))}.`
-  return `${KEEP_LABEL} saves ${fmtUsd(cold)}; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s))} ` +
+  if (!holds(s, now)) return `${KEEP_LABEL} ${cold == null ? 'pays nothing' : `saves ${fmtUsd(cold)}`}; after ${SEND_LABEL}, keepwarm stays off (/keepwarm to arm it).`
+  if (cold == null || warm == null) return `${KEEP_LABEL} pays nothing; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s, now))}.`
+  return `${KEEP_LABEL} saves ${fmtUsd(cold)}; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s, now))} ` +
     `at about ${fmtUsd(warm)} a ping, so the next break does not cost ${fmtUsd(cold)} again.`
 }
 
@@ -493,8 +494,27 @@ function afterRetries(n: number): string {
 
 /** The reply to an arming command; on a cold cache it says when the first ping can come. */
 /** How long keepwarm holds the cache after a paid cold write: the rolling window when always is on. */
-function holdMs(s: State): number {
-  return s.always ? DEFAULT_WINDOW_MS : AUTO_WARM_MS
+function holdMs(s: State, now: number): number {
+  if (s.always) return DEFAULT_WINDOW_MS
+  // With Auto keepwarm off, only a window armed by hand holds the cache, until its own deadline.
+  return autoWarm ? AUTO_WARM_MS : Math.max(0, s.deadline - now)
+}
+
+/** The "Auto keepwarm" option: whether a paid cold write arms keepwarm for three hours by itself. Set in register. */
+let autoWarm = true
+
+/** Reads the "autoWarm" option: anything but "off" keeps the default, on. */
+export const autoWarmFrom = (options: Record<string, unknown> | undefined): boolean => options?.autoWarm !== 'off'
+
+/** Whether a paid cold write leaves keepwarm holding the cache: always on, the Auto keepwarm option, or a window armed by hand. */
+function holds(s: State, now: number): boolean {
+  return autoWarm || s.always || s.deadline > now
+}
+
+/** What the guard says about keepwarm after a paid cold write; `then` is the wording of the refusal. */
+function holdNote(s: State, now: number, then: boolean): string {
+  if (!holds(s, now)) return 'keepwarm stays off (/keepwarm to arm it)'
+  return then ? `keepwarm will then hold the cache for ${fmtDuration(holdMs(s, now))}` : `keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands`
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
@@ -559,7 +579,8 @@ export function freshState(): State {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  autoWarm = autoWarmFrom(options)
   const s = freshState()
   let light = false
   let noColor = false
@@ -743,7 +764,7 @@ export const register: Register = on => {
       if (model) s.lastModel = model
       const sid = s.sid
       const send = sendLabel(s)
-      const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s)} Send it anyway?`, send)
+      const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s, now)} Send it anyway?`, send)
       if (s.sid !== sid) return { drop: MOVED_TEXT }
       if (answer !== send) return { drop: 'cache-tax test: not sent.' }
       // A test that lands on a cache that really is cold pays like any cold send, so it is scored like one.
@@ -769,7 +790,7 @@ export const register: Register = on => {
     const under = guard !== 'warn' && usd != null && usd < guard
     if (guard === 'warn' || unattended || under) {
       const why = unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
-      $.ui.log(`${guardText(s, now)} Sending anyway${why}; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
+      $.ui.log(`${guardText(s, now)} Sending anyway${why}; ${holdNote(s, now, false)}.`)
       s.coldWritePending = true
       return next(e)
     }
@@ -784,7 +805,7 @@ export const register: Register = on => {
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
     const sid = s.sid
     const send = sendLabel(s)
-    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s)} Send it anyway?`, send)
+    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
     // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
     // answer belongs to the old one: nothing is sent, scored or stored under the new id.
     if (s.sid !== sid) return { drop: MOVED_TEXT }
@@ -796,7 +817,7 @@ export const register: Register = on => {
     // No dialog to answer (dismissed, or a run with no one to ask): refuse once, the resend pays.
     s.ackedAt = s.lastRequestAt
     if (s.lastResponseAt) await $.store.set(ackedKey(s), s.lastResponseAt)
-    return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(holdMs(s))}. Or /clear and start from a note.` }
+    return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and ${holdNote(s, now, true)}. Or /clear and start from a note.` }
   })
 
   on('turn.step', async function* ($, e, next) {
@@ -873,7 +894,7 @@ export const register: Register = on => {
         const price = priceOf(s.lastModel, prev || s.ctx)
         const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
-        const extend = s.deadline < now + AUTO_WARM_MS && s.offs === offs
+        const extend = autoWarm && s.deadline < now + AUTO_WARM_MS && s.offs === offs
         if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))

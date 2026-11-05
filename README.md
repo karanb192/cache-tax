@@ -32,6 +32,14 @@ In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a s
 
 **Prefer a settings hook?** The [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax) warns by default, refuses once with `CACHE_TAX_BLOCK=1`, and provides a standalone status-line countdown. Warming is part of this mod.
 
+## Options
+
+In `/config`, under cache-tax:
+
+    Auto keepwarm:  on | off
+
+`on` (the default) keeps today's behavior: after you pay a cold cache write, keepwarm arms itself for three hours. `off` leaves keepwarm alone until you arm it with `/keepwarm`; the guard's wording then says keepwarm stays off, or names the time left on a window you armed. `/keepwarm always` still arms it either way.
+
 ## How it works
 
 **Before a break:** `/keepwarm` arms a bounded window. After 50 idle minutes, a timer inside Claude Code sends one tool-less fork over the session's transcript. It reads usage after every ping and stops if reads are zero or writes reach 10% of reads. There is no background transcript-polling loop.
@@ -106,7 +114,7 @@ Validated on Claude Code 2.1.312:
 Reach L2, drives Claude. Sees every prompt you type, every model request's timing and every answer's token counts.
 
     Threat model for cache-tax (reach L2, drives Claude)
-    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list; the session id, the session's model and the engine's own context figure and start time, once per conversation the process runs, and the model again before pricing a cold send; the reason and session id of a conversation ending under /clear or an in-process resume; each main request's message count; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch and guard mode with its dollar floor
+    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list; the session id, the session's model and the engine's own context figure and start time, once per conversation the process runs, and the model again before pricing a cold send; the reason and session id of a conversation ending under /clear or an in-process resume; each main request's message count; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch and guard mode with its dollar floor; at load, its Auto keepwarm option
     2. Runs:     one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read; one question in Claude Code's own dialog before a cold send goes out, or on the next prompt after /cache-tax guard test
     3. Sends:    nothing leaves the machine except the fork, an API request over the session's own transcript with a fixed one-line prompt
     4. Persists: in $.store, the keepwarm deadline and the ping period under this session's id (with always on, rewritten after each turn), and the always switch and the guard mode (a dollar floor is stored in its place) for every session; after a refusal, the time of the last response under this session's id, so a resend from a new process (claude -p starts one per turn) goes through, deleted by that resend or /clear; a window that has ended is deleted at stop and at this session's next start, together with the bare keys of a 2.1.0 store; another session's keys are never deleted here, because a read followed by a delete cannot be made atomic against that session renewing its window, so a session that armed keepwarm and never came back leaves two small keys behind; the session's cold-write tally lives in memory and dies with the session
@@ -154,8 +162,9 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [192 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [197 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
+- **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
