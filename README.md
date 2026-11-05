@@ -163,7 +163,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [226 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [228 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
@@ -186,3 +186,7 @@ npx -p typescript tsc -p .
 ```
 
 Generated declarations live in `.claude-plugin/types/`. Keep them untracked.
+
+## Reading the state from another mod
+
+cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It is experimental until 3.0: fields may change in a minor release. `cold` is the same one-hour estimate `/cache-tax` shows, not a check of the server's cache. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.

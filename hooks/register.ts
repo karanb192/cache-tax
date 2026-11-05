@@ -1,5 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { statusIcons } from './status-icons'
+import type { CacheTaxStatus } from '../types'
 
 const TTL_MS = 60 * 60 * 1000
 const PING_AFTER_MS = 50 * 60 * 1000
@@ -281,6 +282,24 @@ function statusText(s: State, now: number): string | undefined {
     : s.retries ? ` · API busy, ping retry ${s.retries} of ${MAX_RETRIES}`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
+}
+
+/** The read-only view `$.cacheTax.status()` gives other mods. */
+export function statusOf(s: State, now: number): CacheTaxStatus {
+  const open = !s.stopped && s.deadline > now
+  const known = Boolean(s.lastRequestAt) && !s.compacted
+  return {
+    keepwarm: s.stopped ? 'stopped' : open ? 'on' : 'off',
+    leftMs: open ? s.deadline - now : 0,
+    always: s.always,
+    alwaysMs: s.always ? s.alwaysMs : null,
+    autoWarm,
+    guard: s.guard === 'warn' ? 'warn' : 'refuse',
+    guardFloorUsd: s.guard === 'warn' || !s.guard ? null : s.guard,
+    cold: known ? isCold(s, now) : null,
+    stopped: s.stopped,
+    coldWrites: s.misses.length,
+  }
 }
 
 function updateStatus($: EngineInterface, s: State, now: number) {
@@ -596,6 +615,11 @@ export const register: Register = (on, options) => {
   const s = freshState()
   let light = false
   let noColor = false
+
+  on('engine.create', async (_$, e, next) => {
+    const beneath = await next(e)
+    return { ...beneath, cacheTax: { status: async () => statusOf(s, await beneath.clock.now()) } }
+  })
 
   on('config.set', { key: 'theme' }, async ($, e, next) => {
     const result = await next(e)

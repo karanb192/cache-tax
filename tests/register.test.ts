@@ -3082,3 +3082,40 @@ describe('always with a window of its own, against a finishing turn and a paid c
     expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
   })
 })
+
+// A consumer seated beside the mod: the way another plugin calls the noun. `register` closes over nothing of this file.
+const peek: Plugin = {
+  name: 'peek',
+  register(on) {
+    on('command.run', { command: 'peek' }, async $ => ({ text: JSON.stringify(await $.cacheTax.status()) }))
+  },
+}
+const peekCmd = { command: 'peek', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as unknown as CommandRunInput
+
+describe('$.cacheTax noun', () => {
+  test('status reads keepwarm off, then on with the window left', { plugins: [peek] }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const read = async () => JSON.parse(((await $.command.run(peekCmd)) as { text: string }).text)
+    expect(await read()).toMatchObject({ keepwarm: 'off', leftMs: 0, cold: null, guard: 'refuse', coldWrites: 0 })
+    await $.command.run(run('keepwarm', '90m'))
+    await $.turn.complete(turn())
+    expect(await read()).toMatchObject({ keepwarm: 'on', leftMs: 90 * MIN, cold: false })
+    // The time to the next ping is not part of the contract: it would need the real schedule, not the ping period.
+    expect('nextPingMs' in await read()).toBe(false)
+  })
+
+  test('status names the always window and the guard floor', { plugins: [peek] }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const read = async () => JSON.parse(((await $.command.run(peekCmd)) as { text: string }).text)
+    expect(await read()).toMatchObject({ always: false, alwaysMs: null, autoWarm: true, guard: 'refuse', guardFloorUsd: null })
+    await $.command.run(run('keepwarm', 'always 24h'))
+    await $.command.run(run('cache-tax', 'guard refuse 5'))
+    expect(await read()).toMatchObject({ always: true, alwaysMs: 24 * HOUR, guard: 'refuse', guardFloorUsd: 5 })
+    await $.command.run(run('cache-tax', 'guard warn'))
+    expect(await read()).toMatchObject({ guard: 'warn', guardFloorUsd: null })
+  })
+})
