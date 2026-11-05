@@ -61,11 +61,11 @@ type PingRecord = { at: number; read: number; write: number; usd: number | null;
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
-/** Where the state shows: the band above the prompt, the status entry, or nowhere. */
-export type Display = 'band' | 'status' | 'off'
+/** Where the state shows: the band above the prompt or the status entry. There is no hidden mode: pings cost tokens, so the screen always says when they run. */
+export type Display = 'band' | 'status'
 
 export const displayOf = (options: Readonly<Record<string, unknown>>): Display =>
-  options.display === 'status' || options.display === 'off' ? options.display : 'band'
+  options.display === 'status' ? 'status' : 'band'
 
 export type State = {
   display: Display
@@ -310,7 +310,7 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
 
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
-  else if (s.display !== 'off') $.ui.status(statusText(s, now))
+  else $.ui.status(statusText(s, now))
   if (s.deadline > now && !s.statusRefresh) {
     // Repaint the countdown independently of the model-request and retry timers.
     const refresh = $.clock.every(STATUS_REFRESH_MS, () => {
@@ -666,10 +666,8 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // `display: status` or `off` leaves the band to others; `off` also keeps the
-    // status entry clear. The guard, keepwarm and /cache-tax work in every mode.
+    // `display: status` leaves the row above the prompt to others and shows the state as a status entry.
     s.hasBand = s.display === 'band' && (e.surface === 'terminal' || e.surface === 'desktop')
-    if (s.display === 'off') $.ui.status(undefined)
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')

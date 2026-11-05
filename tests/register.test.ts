@@ -3144,13 +3144,12 @@ describe('display option', () => {
     expect(w.status.some(text => typeof text === 'string' && text.startsWith('keepwarm '))).toBe(true)
   })
 
-  test('off draws no row and no status entry, and the commands still answer', { options: { display: 'off' } }, async ($, on) => {
+  test('off is not a choice: it falls back to the band, so running pings always show', { options: { display: 'off' } }, async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
     await armed($)
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Image' })).toBe(undefined)
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
     expect(w.status.every(text => text === undefined)).toBe(true)
-    expect((await $.command.run(run('cache-tax', ''))).text).toContain('keepwarm')
   })
 })
