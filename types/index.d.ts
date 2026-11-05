@@ -16,10 +16,14 @@ export type CacheTaxStatus = {
   nextPingMs: number | null
   /** The /keepwarm always switch. */
   always: boolean
+  /** The always window in ms (six hours unless /keepwarm always <window> set another), or null while always is off. */
+  alwaysMs: number | null
   /** The "Auto keepwarm" option: whether a paid cold write arms keepwarm by itself. */
   autoWarm: boolean
-  /** What a cold send does: refuse once, or warn. */
+  /** What a cold send does: `refuse` asks first (refuse once where nobody can answer), `warn` shows the price and sends. */
   guard: 'refuse' | 'warn'
+  /** Under `refuse`, the dollar floor below which a cold send goes through with its price shown; null for none. */
+  guardFloorUsd: number | null
   /** Whether the cache is cold now, or null before the first turn or after compaction. */
   cold: boolean | null
   /** Why keepwarm stopped, when it did. */
