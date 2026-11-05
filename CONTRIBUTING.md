@@ -15,22 +15,23 @@ Every PR carries evidence that matches the change. A reviewer should be able to 
 
 | Your change | Evidence to include |
 |---|---|
-| Anything a user sees: the row above the prompt, the status line, a dialog, a command's reply, the website | A screenshot or a short screen recording (under 30 seconds) from a real Claude Code session, before and after. Name the Claude Code version and the surface (terminal app, Desktop Code tab). Say which surfaces you did not check. |
+| Anything a user sees in Claude Code: the row above the prompt, the status line, a dialog, a command's reply | A screenshot or a short screen recording (under 30 seconds) from a real Claude Code session, before and after. Name the Claude Code version and the surface (terminal app, Desktop Code tab). Say which surfaces you did not check. |
+| The website (`site/`), which deploys from `main` on merge | Browser screenshots before and after, at a desktop and a phone width, in light and dark mode. |
 | Behaviour: when the guard stops or asks, when pings run, what gets scored | A test in `tests/register.test.ts` that fails before your change and passes after. Say in the PR that you checked it fails without the fix. |
 | Timing: anything that waits on the clock, the store, a dialog or a turn | A test that holds that wait open and runs the competing event in the middle (a `/clear`, a resume, `/keepwarm off`, another command). Races are where most review findings come from, and a recording cannot show them. |
 | Cost: anything that changes how often pings run or what they cost | The arithmetic: pings per window and their price against one cold write. |
 
-Screenshots and recordings must be real captures of the running thing. Do not render a mock-up and present it as a screenshot. Leave out anything private on screen, such as other conversations or file paths.
+Screenshots and recordings must be real captures of the running thing. Do not render a mock-up and present it as a screenshot. If you cannot capture or run something, say so and why; an honest gap is easier to review than a guess. Leave out anything private on screen, such as other conversations or file paths.
 
 ## Checks to run
 
 ```sh
 claude plugin validate .
 claude plugin test .
-tsc -p .
+npx -p typescript tsc -p .
 ```
 
-`tsc` needs the generated declarations in `.claude-plugin/types/`, which Claude Code writes when it loads the plugin from your checkout (`claude --plugin-dir .`); keep them untracked. Paste the pass count from `claude plugin test .` into the PR.
+The typecheck needs the generated declarations in `.claude-plugin/types/`, which Claude Code writes when it loads the plugin from your checkout (`claude --plugin-dir .`); keep them untracked. Paste the pass count from `claude plugin test .` into the PR.
 
 The test kit can set the plugin's options for one test, so a `userConfig` option is testable end to end: `test('name', { options: { autoWarm: 'off' } }, async ($, on) => { ... })`.
 
