@@ -163,7 +163,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [220 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [222 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.

@@ -2945,3 +2945,45 @@ describe('always with a window of its own, beside the guard question', () => {
     })
   }
 })
+
+describe('always with a window of its own, against a finishing turn and a paid cold write', () => {
+  const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+
+  test('shortening always while a turn reads the old setting leaves the new window', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', 168 * HOUR]])
+    let hold = false
+    let release = () => {}
+    const w = world(on, [], {
+      store,
+      storeGate: async (op, key) => { if (hold && op === 'get' && key === 'always') { hold = false; await new Promise<void>(r => { release = r }) } },
+    })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    hold = true
+    const finishing = $.turn.complete(turn())
+    await settle()
+    await $.command.run(run('keepwarm', 'always 1h'))
+    release()
+    await finishing
+    expect(store.get('always')).toBe(HOUR)
+    expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
+    void clock
+  })
+
+  test('always 1h is not stretched to three hours by a paid cold write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'always 1h'))
+    await $.command.run(run('cache-tax', 'guard warn'))
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(w.logs.at(-1)).toMatch(/keepwarm will hold the cache for 1h00m once it lands/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
+    expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm for 3h00m/)
+    expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
+  })
+})

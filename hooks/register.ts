@@ -717,6 +717,8 @@ export const register: Register = (on, options) => {
       if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
       s.always = true
       s.alwaysMs = windowMs
+      // Counted like an off, before any await: a turn finishing meanwhile read the old setting and must not renew with it.
+      s.offs++
       // The default window is still stored as true, which every version reads.
       await $.store.set(KEY_ALWAYS, windowMs === DEFAULT_WINDOW_MS ? true : windowMs)
       await startWindow($, s, windowMs, PING_AFTER_MS)
@@ -913,7 +915,8 @@ export const register: Register = (on, options) => {
         const price = priceOf(s.lastModel, prev || s.ctx)
         const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
-        const extend = autoWarm && s.deadline < now + AUTO_WARM_MS && s.offs === offs
+        // With always on, its own window governs renewal, shorter than three hours or not; the guard promised that one.
+        const extend = autoWarm && !s.always && s.deadline < now + AUTO_WARM_MS && s.offs === offs
         if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
