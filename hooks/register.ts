@@ -291,7 +291,6 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
   return {
     keepwarm: s.stopped ? 'stopped' : open ? 'on' : 'off',
     leftMs: open ? s.deadline - now : 0,
-    nextPingMs: open && known && !isCold(s, now) ? Math.max(0, s.lastRequestAt + s.every - now) : null,
     always: s.always,
     alwaysMs: s.always ? s.alwaysMs : null,
     autoWarm,

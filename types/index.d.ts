@@ -12,8 +12,6 @@ export type CacheTaxStatus = {
   keepwarm: CacheTaxKeepwarm
   /** Time left in the window, in ms; 0 unless `on`. */
   leftMs: number
-  /** Time to the next ping, in ms, when one is scheduled. */
-  nextPingMs: number | null
   /** The /keepwarm always switch. */
   always: boolean
   /** The always window in ms (six hours unless /keepwarm always <window> set another), or null while always is off. */

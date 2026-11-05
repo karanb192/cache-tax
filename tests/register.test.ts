@@ -3098,10 +3098,12 @@ describe('$.cacheTax noun', () => {
     world(on, [])
     await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
     const read = async () => JSON.parse(((await $.command.run(peekCmd)) as { text: string }).text)
-    expect(await read()).toMatchObject({ keepwarm: 'off', leftMs: 0, nextPingMs: null, cold: null, guard: 'refuse', coldWrites: 0 })
+    expect(await read()).toMatchObject({ keepwarm: 'off', leftMs: 0, cold: null, guard: 'refuse', coldWrites: 0 })
     await $.command.run(run('keepwarm', '90m'))
     await $.turn.complete(turn())
     expect(await read()).toMatchObject({ keepwarm: 'on', leftMs: 90 * MIN, cold: false })
+    // The time to the next ping is not part of the contract: it would need the real schedule, not the ping period.
+    expect('nextPingMs' in await read()).toBe(false)
   })
 
   test('status names the always window and the guard floor', { plugins: [peek] }, async ($, on) => {
