@@ -550,16 +550,10 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   else await $.store.set(everyKey(s), every)
   await $.store.set(deadlineKey(s), deadline)
   if (stale()) {
-    // Remove only what this call wrote; a window armed after the off or the always change is left alone, and
-    // written back if this call's write landed over it.
+    // Remove only what this call wrote; a window armed after the off or the always change is left alone.
     if ((await $.store.get(deadlineKey(s))) === deadline) {
       await $.store.delete(deadlineKey(s))
       if (!s.deadline) await $.store.delete(everyKey(s))
-      else if (s.deadline !== deadline) {
-        if (s.every === PING_AFTER_MS) await $.store.delete(everyKey(s))
-        else await $.store.set(everyKey(s), s.every)
-        await $.store.set(deadlineKey(s), s.deadline)
-      }
     }
     return
   }
@@ -666,8 +660,8 @@ export const register: Register = (on, options) => {
     else if (s.deadline) await arm($, s)
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-tax)',
-      argumentHint: '[6h | always | off | status]',
+      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always (or always 24h), off, or status (cache-tax)',
+      argumentHint: '[6h | always [24h] | off | status]',
       immediate: true,
     })
     await $.command.register({
