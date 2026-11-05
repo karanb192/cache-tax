@@ -16,6 +16,16 @@
         "on",
         "off"
       ]
+    },
+    "display": {
+      "title": "Display",
+      "description": "Where cache-tax shows its state. band: the row above the prompt (the default). status: the status entry under the prompt instead, with no row.",
+      "type": "string",
+      "options": [
+        "band",
+        "status"
+      ],
+      "default": "band"
     }
   },
   "types": "./types/index.d.ts"
