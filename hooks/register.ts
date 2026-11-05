@@ -392,6 +392,8 @@ async function ping($: EngineInterface, s: State) {
   if (reply.isAnswered === false) {
     // A restarted process has no conversation to fork until its first turn; the window waits for one instead of ending.
     if (reply.reason === 'nothing-to-fork') {
+      // Said once per wait: /keepwarm already answered "on", and the status row alone does not tell anyone to act.
+      if (!s.waitForTurn) $.ui.log('keepwarm is on, but there is nothing to fork yet, so no ping goes out until your next message. Send one more message and the pings start.')
       s.waitForTurn = true
       return arm($, s)
     }
