@@ -8,6 +8,7 @@ const STATUS_REFRESH_MS = 60 * 1000
 const MAX_RETRIES = 3
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
+const MAX_ALWAYS_MS = 168 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
@@ -66,6 +67,9 @@ export type State = {
   deadline: number
   every: number
   always: boolean
+  alwaysMs: number
+  /** Bumped by each /keepwarm always: a store read of the setting from before it is stale. */
+  alwaysGen: number
   lastRequestAt: number
   /** When the last main turn's response ended: what a resumed process's seconds_since_last_response counts from. */
   lastResponseAt: number
@@ -115,6 +119,12 @@ export function parseDuration(text: string): number | null {
   const m = /^(?:(\d+)h)?(?:(\d+)m)?$/.exec(text.trim())
   if (!m || (m[1] === undefined && m[2] === undefined)) return null
   return (Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0)) * 60 * 1000
+}
+
+/** The always switch as stored: true is the default window (all a store written by 2.3 or earlier holds), a number the window /keepwarm always <window> set. Anything else is off. */
+export function alwaysWindow(value: unknown): number {
+  if (value === true) return DEFAULT_WINDOW_MS
+  return typeof value === 'number' && value >= TTL_MS && value <= MAX_ALWAYS_MS ? value : 0
 }
 
 export function fmtDuration(ms: number): string {
@@ -390,7 +400,7 @@ async function reseat($: EngineInterface, s: State) {
   // seated under the old id, and a window opened meanwhile waits in memory for the id it belongs to.
   if (id === s.endingSid) return
   const now = await seat($, s, id)
-  if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+  if (s.always) await startWindow($, s, s.alwaysMs, PING_AFTER_MS)
   // A window carried over, or armed while the conversation was ending, is written under this id.
   else if (s.deadline) await startWindow($, s, s.deadline - now, s.every)
   else updateStatus($, s, now)
@@ -495,7 +505,7 @@ function afterRetries(n: number): string {
 /** The reply to an arming command; on a cold cache it says when the first ping can come. */
 /** How long keepwarm holds the cache after a paid cold write: the rolling window when always is on. */
 function holdMs(s: State, now: number): number {
-  if (s.always) return DEFAULT_WINDOW_MS
+  if (s.always) return s.alwaysMs
   // With Auto keepwarm off, only a window armed by hand holds the cache, until its own deadline.
   return autoWarm ? AUTO_WARM_MS : Math.max(0, s.deadline - now)
 }
@@ -523,11 +533,13 @@ function armedText(s: State, now: number, windowMs: number): string {
 }
 
 // A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
-// before deciding to open a window passes the count it read first.
-async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs) {
-  if (s.offs !== offs) return
+// before deciding to open a window passes the count it read first. An always renewal also passes the always
+// generation it read, so a /keepwarm always meanwhile wins the same way.
+async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen) {
+  const stale = () => s.offs !== offs || s.alwaysGen !== gen
+  if (stale()) return
   const now = await $.clock.now()
-  if (s.offs !== offs) return
+  if (stale()) return
   const deadline = now + windowMs
   s.every = every
   s.deadline = deadline
@@ -537,8 +549,8 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   if (every === PING_AFTER_MS) await $.store.delete(everyKey(s))
   else await $.store.set(everyKey(s), every)
   await $.store.set(deadlineKey(s), deadline)
-  if (s.offs !== offs) {
-    // Remove only what this call wrote; a window armed after the off is left alone.
+  if (stale()) {
+    // Remove only what this call wrote; a window armed after the off or the always change is left alone.
     if ((await $.store.get(deadlineKey(s))) === deadline) {
       await $.store.delete(deadlineKey(s))
       if (!s.deadline) await $.store.delete(everyKey(s))
@@ -559,7 +571,7 @@ function card(s: State, now: number): string {
   lines.push(`context     ${s.ctx.toLocaleString('en-US')} tokens`)
   lines.push(`cold cost   ${fmtUsd(coldUsd(s))} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`)
   const always = s.always ? ' (always)' : ''
-  const idle = s.always ? 'off until the next turn, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
+  const idle = s.always ? `off until the next turn, which arms ${fmtDuration(s.alwaysMs)} (always)` : 'off (/keepwarm to arm it for 6h00m)'
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
@@ -573,7 +585,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
   }
@@ -639,15 +651,17 @@ export const register: Register = (on, options) => {
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
     // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
     s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
-    s.always = (await $.store.get(KEY_ALWAYS)) === true
-    // Always means a fresh default window every session, whatever the last one left behind.
-    if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+    const stored = alwaysWindow(await $.store.get(KEY_ALWAYS))
+    s.always = stored > 0
+    if (stored) s.alwaysMs = stored
+    // Always means a fresh window of its length every session, whatever the last one left behind.
+    if (s.always) await startWindow($, s, s.alwaysMs, PING_AFTER_MS)
     // The classic start arms a restored window too, but a managed plugin above this tier may continue beneath it; arming twice leaves one timer.
     else if (s.deadline) await arm($, s)
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-tax)',
-      argumentHint: '[6h | always | off | status]',
+      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always (or always 24h), off, or status (cache-tax)',
+      argumentHint: '[6h | always [24h] | off | status]',
       immediate: true,
     })
     await $.command.register({
@@ -702,11 +716,18 @@ export const register: Register = (on, options) => {
       return { text: wasAlways ? 'keepwarm is off, and always is off for every session from its next turn' : 'keepwarm is off' }
     }
     if (words[0] === 'always') {
+      // One optional window and nothing after it: a dropped trailing word would arm something other than what was typed.
+      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]) : null
+      if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
       s.always = true
-      await $.store.set(KEY_ALWAYS, true)
-      await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+      s.alwaysMs = windowMs
+      // Before any await: a turn finishing meanwhile may have read the old setting, and must renew with this one instead.
+      s.alwaysGen++
+      // The default window is still stored as true, which every version reads.
+      await $.store.set(KEY_ALWAYS, windowMs === DEFAULT_WINDOW_MS ? true : windowMs)
+      await startWindow($, s, windowMs, PING_AFTER_MS)
       const cold = isCold(s, now) ? `. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` : ''
-      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(DEFAULT_WINDOW_MS)} after its last turn; /keepwarm off turns it off for good${cold}` }
+      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(windowMs)} after its last turn; /keepwarm off turns it off for good${cold}` }
     }
     if (!words.length) {
       await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
@@ -724,8 +745,8 @@ export const register: Register = (on, options) => {
         every = period
       }
       await startWindow($, s, window, every)
-      const rolls = s.always && (window < DEFAULT_WINDOW_MS || every !== PING_AFTER_MS)
-      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(DEFAULT_WINDOW_MS)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }
+      const rolls = s.always && (window < s.alwaysMs || every !== PING_AFTER_MS)
+      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(s.alwaysMs)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }
     }
     return { text: statusText(s, now) ?? 'keepwarm is off' }
   })
@@ -864,14 +885,20 @@ export const register: Register = (on, options) => {
     if (s.lastRequestAt) s.resumedAt = 0
     s.waitForTurn = false
     s.ackedAt = 0
-    // Always covers any break up to six hours after a turn that reached the cache (a turn that failed before any
-    // response touched nothing, and its cache may be cold): a window of at least six hours at the default period,
-    // which brings back a stopped window and replaces a shorter one or a testing period. Another session's
-    // /keepwarm off or /keepwarm always changes the shared switch, so every such turn reads it.
+    // Always covers any break up to its window (six hours unless /keepwarm always <window> set another) after a turn
+    // that reached the cache (a turn that failed before any response touched nothing, and its cache may be cold): a
+    // window of at least that length at the default period, which brings back a stopped window and replaces a shorter
+    // one or a testing period. Another session's /keepwarm off or /keepwarm always changes the shared switch and its
+    // window, so every such turn reads them.
     if (e.usage) {
-      const shared = (await $.store.get(KEY_ALWAYS)) === true
-      if (s.offs === offs) s.always = shared
-      if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS, offs)
+      const gen = s.alwaysGen
+      const shared = alwaysWindow(await $.store.get(KEY_ALWAYS))
+      // A /keepwarm always during the read set the switch and window itself; the read is older, so it is dropped.
+      if (s.offs === offs && s.alwaysGen === gen) {
+        s.always = shared > 0
+        if (shared) s.alwaysMs = shared
+      }
+      if (s.always) await startWindow($, s, Math.max(s.alwaysMs, s.deadline - now), PING_AFTER_MS, offs, gen)
     }
     const u = e.usage
     if (u) {
@@ -894,7 +921,8 @@ export const register: Register = (on, options) => {
         const price = priceOf(s.lastModel, prev || s.ctx)
         const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
-        const extend = autoWarm && s.deadline < now + AUTO_WARM_MS && s.offs === offs
+        // With always on, its own window governs renewal, shorter than three hours or not; the guard promised that one.
+        const extend = autoWarm && !s.always && s.deadline < now + AUTO_WARM_MS && s.offs === offs
         if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
