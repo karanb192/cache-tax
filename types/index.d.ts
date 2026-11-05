@@ -3,6 +3,9 @@
  * (a status band, say) can show keepwarm without parsing /cache-tax output.
  * Where cache-tax is not installed there is no `$.cacheTax`, so a caller
  * tests for it before use.
+ *
+ * Experimental until cache-tax 3.0: fields may be added, renamed or removed
+ * in a minor release.
  */
 
 /** Where keepwarm stands: `on` while a window is open, `stopped` after it gave up, `off` otherwise. */
@@ -22,7 +25,10 @@ export type CacheTaxStatus = {
   guard: 'refuse' | 'warn'
   /** Under `refuse`, the dollar floor below which a cold send goes through with its price shown; null for none. */
   guardFloorUsd: number | null
-  /** Whether the cache is cold now, or null before the first turn or after compaction. */
+  /**
+   * Whether the cache is cold now, or null before the first turn or after compaction. An estimate from the
+   * one-hour clock since the last request, not a check of the server's cache: show it as one.
+   */
   cold: boolean | null
   /** Why keepwarm stopped, when it did. */
   stopped: string | null

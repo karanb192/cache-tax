@@ -189,4 +189,4 @@ Generated declarations live in `.claude-plugin/types/`. Keep them untracked.
 
 ## Reading the state from another mod
 
-cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.
+cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It is experimental until 3.0: fields may change in a minor release. `cold` is the same one-hour estimate `/cache-tax` shows, not a check of the server's cache. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.
