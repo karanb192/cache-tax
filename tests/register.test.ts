@@ -2687,6 +2687,29 @@ describe('ask before a cold send', () => {
     expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
   })
 
+  test('guard test answered after the cache went cold meanwhile scores the write it pays', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    let answer = (_: string) => {}
+    on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+      const q = e.questions[0]
+      const a = await new Promise<string>(r => { answer = r })
+      return { result: { questions: e.questions, answers: { [q.question]: a } } }
+    })
+    const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(59 * MIN)
+    await $.command.run(run('cache-tax', 'guard test'))
+    const pending = $.prompt.submit(prompt('hi'))
+    await settle()
+    await clock.advance(2 * MIN)
+    answer('Send anyway ($4.01)')
+    expect((await pending).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 160000, cache_creation_input_tokens: 40000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
+  })
+
   test('guard test prices the send at the model selected now', async ($, on) => {
     mock.clock(on, { now: START })
     let model = 'claude-haiku-5-5'
