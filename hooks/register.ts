@@ -13,6 +13,10 @@ const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
+const KEY_ACKED = 'acked'
+// The stored refusal names the last response, which a resumed process rebuilds from whole seconds and the running one
+// stamps at turn.complete: the same moment, matched within this. Request times differ by the response's own length.
+const ACK_SLACK_MS = 60 * 1000
 const KEY_ALWAYS = 'always'
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
@@ -60,6 +64,8 @@ export type State = {
   every: number
   always: boolean
   lastRequestAt: number
+  /** When the last main turn's response ended: what a resumed process's seconds_since_last_response counts from. */
+  lastResponseAt: number
   lastModel: string | null
   ctx: number
   compacted: boolean
@@ -170,6 +176,7 @@ export type ResumeFields = {
 export function resetForClear(s: State) {
   s.ctx = 0
   s.lastRequestAt = 0
+  s.lastResponseAt = 0
   s.compacted = false
   s.resumedAt = 0
   s.transcript = 0
@@ -189,6 +196,7 @@ export function seedFromResume(s: State, e: ResumeFields, now: number): string |
   if (typeof e.context_tokens === 'number' && e.context_tokens > 0) s.ctx = e.context_tokens
   if (typeof e.seconds_since_last_response === 'number') {
     s.lastRequestAt = now - e.seconds_since_last_response * 1000
+    s.lastResponseAt = s.lastRequestAt
     s.resumedAt = 0
   }
   if (typeof e.model === 'string') s.lastModel = e.model
@@ -274,6 +282,10 @@ function everyKey(s: State): string {
   return `${KEY_EVERY}:${s.sid}`
 }
 
+function ackedKey(s: State): string {
+  return `${KEY_ACKED}:${s.sid}`
+}
+
 /** Clears this session's own dead window and the bare keys a store written before 2.1.1 still holds. Other sessions' keys are never touched: a read followed by a delete cannot be made atomic against their renewal. */
 async function prune($: EngineInterface, s: State, now: number) {
   for (const key of [KEY_DEADLINE, deadlineKey(s)]) {
@@ -307,7 +319,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
 async function endConversation($: EngineInterface, s: State, reason: 'clear' | 'resume') {
   // Claimed before any await: a second end or a classic start for the same conversation finds it already gone, and an
   // end cut short by its budget leaves no timer and no old id behind, only the keys below.
-  const keys = [deadlineKey(s), everyKey(s)]
+  const keys = [deadlineKey(s), everyKey(s), ackedKey(s)]
   const ending = s.sid
   resetForClear(s)
   s.sid = ''
@@ -509,7 +521,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
   }
@@ -711,12 +723,16 @@ export const register: Register = on => {
       s.coldWritePending = true
       return next(e)
     }
-    if (s.ackedAt === s.lastRequestAt) {
+    // Hosts that start a process per turn (claude -p) lose the in-memory ack, so the refusal is also kept in the store.
+    const acked = await $.store.get(ackedKey(s))
+    if (s.ackedAt === s.lastRequestAt || (typeof acked === 'number' && s.lastResponseAt > 0 && Math.abs(acked - s.lastResponseAt) < ACK_SLACK_MS)) {
       s.ackedAt = 0
+      await $.store.delete(ackedKey(s))
       s.coldWritePending = true
       return next(e)
     }
     s.ackedAt = s.lastRequestAt
+    if (s.lastResponseAt) await $.store.set(ackedKey(s), s.lastResponseAt)
     return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(holdMs(s))}. Or /clear and start from a note.` }
   })
 
@@ -758,6 +774,7 @@ export const register: Register = on => {
     // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
     // A turn aborted before it sent anything touched no cache, so it leaves the clock alone.
     if ((e.usage || !e.isAborted) && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
+    if (e.usage || (!e.isAborted && e.reason !== 'error')) s.lastResponseAt = now
     const compacted = s.compacted
     s.compacted = false
     if (s.lastRequestAt) s.resumedAt = 0

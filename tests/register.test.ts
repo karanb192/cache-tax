@@ -397,6 +397,75 @@ describe('guard', () => {
     expect(w.entered).toEqual(['hi'])
   })
 
+  test('a resend from a new process, as claude -p starts per turn, goes through', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    // The refused send's process stored its ack; this one rebuilds the last request time a second later.
+    const store = new Map<string, unknown>([['acked:S1', 8 * HOUR + 1000]])
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    const resend = await $.prompt.submit(prompt('hi'))
+    expect(resend.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('a refusal is stored for the next process', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    const first = await $.prompt.submit(prompt('hi'))
+    expect(first.drop).toMatch(/cache-tax: the prompt cache went cold/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+  })
+
+  test('a refusal after a long response stores when that response ended, which a resumed process rebuilds', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    for await (const c of $.turn.step({ turnId: 'long', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await clock.advance(2 * MIN)
+    await $.turn.complete(turn({ turnId: 'long', durationMs: 2 * MIN }))
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/cache-tax: the prompt cache went cold/)
+    const now = START + 2 * MIN + 3 * HOUR
+    // claude -p's next process: seconds_since_last_response counts from the response's end, not the request's start.
+    expect(store.get('acked:S1')).toBe(now - 3 * 3600 * 1000)
+  })
+
+  test('an API error without a response preserves the stored refusal identity', async ($, on) => {
+    const clock = mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000 })
+    for await (const c of $.turn.step({ turnId: 'failed', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await clock.advance(2 * MIN)
+    await $.turn.complete(turn({ turnId: 'failed', reason: 'error', isAborted: false, durationMs: 2 * MIN, usage: undefined }))
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/^cache-tax:/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 4 * 3600 + 120, context_tokens: 200000 })
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('/clear forgets the stored refusal', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    await $.prompt.submit(prompt('hi'))
+    expect(store.has('acked:S1')).toBe(true)
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
   test('lets slash commands, warm sends and small contexts through', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [])
