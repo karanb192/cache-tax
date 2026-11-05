@@ -5,5 +5,17 @@
   "author": {
     "name": "Karan Bansal"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "autoWarm": {
+      "type": "string",
+      "title": "Auto keepwarm",
+      "description": "on: after you pay a cold cache write, keepwarm arms itself for three hours (the default). off: keepwarm only runs when you arm it with /keepwarm.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    }
+  }
 }
