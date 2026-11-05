@@ -2947,22 +2947,34 @@ describe('always with a window of its own, beside the guard question', () => {
 })
 
 describe('always with a window of its own, against a finishing turn and a paid cold write', () => {
-  const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+  test('always set during a running turn is renewed from that turn\'s end', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    for await (const c of $.turn.step({ turnId: 'running', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await $.command.run(run('keepwarm', 'always 1h'))
+    await clock.advance(20 * MIN)
+    await $.turn.complete(turn({ turnId: 'running', durationMs: 20 * MIN }))
+    expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
+  })
 
   test('shortening always while a turn reads the old setting leaves the new window', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const store = new Map<string, unknown>([['always', 168 * HOUR]])
     let hold = false
     let release = () => {}
+    let readHeld = () => {}
+    const held = new Promise<void>(r => { readHeld = r })
     const w = world(on, [], {
       store,
-      storeGate: async (op, key) => { if (hold && op === 'get' && key === 'always') { hold = false; await new Promise<void>(r => { release = r }) } },
+      storeGate: async (op, key) => { if (hold && op === 'get' && key === 'always') { hold = false; readHeld(); await new Promise<void>(r => { release = r }) } },
     })
     await $.session.start(session)
     await $.turn.complete(turn())
     hold = true
     const finishing = $.turn.complete(turn())
-    await settle()
+    await held
     await $.command.run(run('keepwarm', 'always 1h'))
     release()
     await finishing

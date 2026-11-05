@@ -68,6 +68,8 @@ export type State = {
   every: number
   always: boolean
   alwaysMs: number
+  /** Bumped by each /keepwarm always: a store read of the setting from before it is stale. */
+  alwaysGen: number
   lastRequestAt: number
   /** When the last main turn's response ended: what a resumed process's seconds_since_last_response counts from. */
   lastResponseAt: number
@@ -581,7 +583,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
   }
@@ -717,8 +719,8 @@ export const register: Register = (on, options) => {
       if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
       s.always = true
       s.alwaysMs = windowMs
-      // Counted like an off, before any await: a turn finishing meanwhile read the old setting and must not renew with it.
-      s.offs++
+      // Before any await: a turn finishing meanwhile may have read the old setting, and must renew with this one instead.
+      s.alwaysGen++
       // The default window is still stored as true, which every version reads.
       await $.store.set(KEY_ALWAYS, windowMs === DEFAULT_WINDOW_MS ? true : windowMs)
       await startWindow($, s, windowMs, PING_AFTER_MS)
@@ -887,8 +889,10 @@ export const register: Register = (on, options) => {
     // one or a testing period. Another session's /keepwarm off or /keepwarm always changes the shared switch and its
     // window, so every such turn reads them.
     if (e.usage) {
+      const gen = s.alwaysGen
       const shared = alwaysWindow(await $.store.get(KEY_ALWAYS))
-      if (s.offs === offs) {
+      // A /keepwarm always during the read set the switch and window itself; the read is older, so it is dropped.
+      if (s.offs === offs && s.alwaysGen === gen) {
         s.always = shared > 0
         if (shared) s.alwaysMs = shared
       }
