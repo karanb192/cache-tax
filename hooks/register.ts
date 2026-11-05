@@ -4,6 +4,7 @@ import { statusIcons } from './status-icons'
 const TTL_MS = 60 * 60 * 1000
 const PING_AFTER_MS = 50 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
+const STATUS_REFRESH_MS = 60 * 1000
 const MAX_RETRIES = 3
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
@@ -71,6 +72,7 @@ export type State = {
   coldWritePending: boolean
   misses: Miss[]
   pending: { cancel: () => void } | null
+  statusRefresh: { cancel: () => void } | null
   last: PingRecord | null
   stopped: string | null
   waitForTurn: boolean
@@ -235,12 +237,26 @@ function statusText(s: State, now: number): string | undefined {
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
   else $.ui.status(statusText(s, now))
+  if (s.deadline > now && !s.statusRefresh) {
+    // Repaint the countdown independently of the model-request and retry timers.
+    const refresh = $.clock.every(STATUS_REFRESH_MS, () => {
+      void $.clock.now().then(at => {
+        if (s.statusRefresh === refresh) updateStatus($, s, at)
+      })
+    })
+    s.statusRefresh = refresh
+  } else if (s.deadline <= now && s.statusRefresh) {
+    s.statusRefresh.cancel()
+    s.statusRefresh = null
+  }
 }
 
-/** Cancels the timer. Every new timer is set right after this, so the tick also says the schedule changed. */
+/** Cancels the ping and display timers. Every new ping timer is set right after this, so the tick also says the schedule changed. */
 function disarm(s: State) {
   if (s.pending) s.pending.cancel()
   s.pending = null
+  if (s.statusRefresh) s.statusRefresh.cancel()
+  s.statusRefresh = null
   s.tick++
 }
 
@@ -399,6 +415,8 @@ async function ping($: EngineInterface, s: State) {
   if (reply.isAnswered === false) {
     // A restarted process has no conversation to fork until its first turn; the window waits for one instead of ending.
     if (reply.reason === 'nothing-to-fork') {
+      // Said once per wait: /keepwarm already answered "on", and the status row alone does not tell anyone to act.
+      if (!s.waitForTurn) $.ui.log('keepwarm is on, but there is nothing to fork yet, so no ping goes out until your next message. Send one more message and the pings start.')
       s.waitForTurn = true
       return arm($, s)
     }
@@ -496,7 +514,7 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
-    resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
+    resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
   }
 }
