@@ -54,7 +54,8 @@ const LONG_PRICES: Array<[string, number, number, number]> = [
 
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
-type GuardMode = 'refuse' | 'warn'
+/** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
+type GuardMode = 'warn' | number
 
 export type State = {
   hasBand: boolean
@@ -510,7 +511,9 @@ function card(s: State, now: number): string {
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
-  lines.push(`guard       ${s.guard === 'refuse' ? 'refuse once (/cache-tax guard warn to only show the price)' : 'warn only (/cache-tax guard refuse to be stopped once)'}`)
+  lines.push(`guard       ${s.guard === 'warn' ? 'warn only (/cache-tax guard refuse to be stopped once)'
+    : s.guard ? `refuse once at ${fmtUsd(s.guard)} or more, warn below (/cache-tax guard refuse to refuse any)`
+    : 'refuse once (/cache-tax guard warn to only show the price)'}`)
   const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
   lines.push(`session     ${s.misses.length} cold write${s.misses.length === 1 ? '' : 's'} paid, ${fmtUsd(paid)}`)
   return lines.join('\n')
@@ -519,7 +522,7 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
-    resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
+    resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
   }
 }
@@ -581,7 +584,8 @@ export const register: Register = on => {
     const savedGuard = await $.store.get(KEY_GUARD)
     s.deadline = typeof saved === 'number' && saved > now ? saved : 0
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
-    s.guard = savedGuard === 'warn' ? 'warn' : 'refuse'
+    // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
+    s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
     s.always = (await $.store.get(KEY_ALWAYS)) === true
     // Always means a fresh default window every session, whatever the last one left behind.
     if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
@@ -596,7 +600,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'cache-tax',
       description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse (cache-tax, the Mod)',
-      argumentHint: '[status | guard warn | guard refuse]',
+      argumentHint: '[status | guard warn | guard refuse [dollars]]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -678,10 +682,14 @@ export const register: Register = on => {
     const words = String(e.args ?? '').trim().split(/\s+/).filter(Boolean)
     const now = await $.clock.now()
     if (words[0] === 'guard') {
-      if (words[1] !== 'warn' && words[1] !== 'refuse') return { text: '/cache-tax guard takes warn or refuse' }
-      s.guard = words[1]
-      await $.store.set(KEY_GUARD, s.guard)
-      return { text: s.guard === 'refuse' ? 'guard set to refuse once: a cold send is dropped with its price, the resend goes through' : 'guard set to warn: a cold send goes through with its price shown' }
+      const floor = words[1] === 'refuse' && words[2] ? Number(words[2].replace(/^\$/, '')) : 0
+      const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
+      if (!valid) return { text: '/cache-tax guard takes warn, refuse, or refuse with a dollar floor such as refuse 5' }
+      s.guard = words[1] === 'warn' ? 'warn' : floor
+      await $.store.set(KEY_GUARD, s.guard || 'refuse')
+      return { text: s.guard === 'warn' ? 'guard set to warn: a cold send goes through with its price shown'
+        : s.guard ? `guard set to refuse once at ${fmtUsd(s.guard)} or more: a cheaper cold send goes through with its price shown`
+        : 'guard set to refuse once: a cold send is dropped with its price, the resend goes through' }
     }
     return { text: card(s, now) }
   })
@@ -700,10 +708,18 @@ export const register: Register = on => {
       return next(e)
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
+    // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
+    const model = await $.session.model()
+    if (model) s.lastModel = model
     // A refused prompt that no person sent would be lost: nobody is there to send it again.
     const unattended = UNATTENDED.has(e.origin.kind)
-    if (s.guard === 'warn' || unattended) {
-      $.ui.log(`${guardText(s, now)} Sending anyway${unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : ''}; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
+    // A model with no price row has no estimate to compare, so the floor never lets it through.
+    const usd = coldUsd(s)
+    const guard = s.guard
+    const under = guard !== 'warn' && usd != null && usd < guard
+    if (guard === 'warn' || unattended || under) {
+      const why = unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
+      $.ui.log(`${guardText(s, now)} Sending anyway${why}; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
       s.coldWritePending = true
       return next(e)
     }
