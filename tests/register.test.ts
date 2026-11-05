@@ -469,6 +469,27 @@ describe('guard', () => {
     expect(w.entered).toEqual([])
   })
 
+  for (const [before, after, refused] of [['claude-haiku-5-5', 'claude-fable-5-1', true], ['claude-fable-5-1', 'claude-haiku-5-5', false]] as const) {
+    test(`with a dollar floor, a switch from ${before} to ${after} is priced at the model now selected`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let model: string = before
+      const w = world(on, [], { model: () => model })
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', 'guard refuse 1'))
+      await $.turn.complete(turn({ usage: usage({ model: before }) }))
+      model = after
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit(prompt('hi'))
+      if (refused) {
+        expect(r.drop).toMatch(/= \$4\.01/)
+        expect(w.entered).toEqual([])
+      } else {
+        expect(r.drop).toBe(undefined)
+        expect(w.logs.at(-1)).toMatch(/Sending anyway, since it is under your \$1\.00 floor/)
+      }
+    })
+  }
+
   test('the dollar floor is restored from the store, and plain refuse or warn replaces it', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const store = new Map<string, unknown>([['guard', 5]])
@@ -477,7 +498,7 @@ describe('guard', () => {
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
-    for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5']) {
+    for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5', 'refuse 5 0']) {
       expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes warn, refuse, or refuse with a dollar floor/)
     }
     expect(store.get('guard')).toBe(5)

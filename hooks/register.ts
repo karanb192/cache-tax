@@ -671,7 +671,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     if (words[0] === 'guard') {
       const floor = words[1] === 'refuse' && words[2] ? Number(words[2].replace(/^\$/, '')) : 0
-      const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && (!words[2] || (floor > 0 && Number.isFinite(floor)))
+      const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
       if (!valid) return { text: '/cache-tax guard takes warn, refuse, or refuse with a dollar floor such as refuse 5' }
       s.guard = words[1] === 'warn' ? 'warn' : floor
       await $.store.set(KEY_GUARD, s.guard || 'refuse')
@@ -696,6 +696,9 @@ export const register: Register = on => {
       return next(e)
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
+    // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
+    const model = await $.session.model()
+    if (model) s.lastModel = model
     // A refused prompt that no person sent would be lost: nobody is there to send it again.
     const unattended = UNATTENDED.has(e.origin.kind)
     // A model with no price row has no estimate to compare, so the floor never lets it through.
