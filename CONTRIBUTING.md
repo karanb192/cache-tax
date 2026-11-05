@@ -1,0 +1,38 @@
+# Contributing to Cache Tax
+
+Thanks for helping. Cache Tax does two things: it keeps the prompt cache warm during breaks, and it tells you what a cold send will cost before you pay it. Changes that make either of those more accurate, cheaper or clearer are the ones most likely to land.
+
+## Before you start
+
+- **Bug fix:** open the PR directly. Link the issue if there is one.
+- **New feature or behaviour change:** open an issue first and describe the case. It saves you from building something that will not fit.
+- **Out of scope for this mod:** writing files, sending prompts on your behalf, keeping prompt text, or calling the model for anything except a keepwarm ping. Those widen what the mod can reach (see [What it can reach](README.md#what-it-can-reach)). They may fit better as a separate mod that reads [`$.cacheTax.status()`](README.md#reading-the-state-from-another-mod).
+
+## Show that it works
+
+Every PR carries evidence that matches the change. A reviewer should be able to see what changed without checking out your branch.
+
+| Your change | Evidence to include |
+|---|---|
+| Anything a user sees: the row above the prompt, the status line, a dialog, a command's reply, the website | A screenshot or a short screen recording (under 30 seconds) from a real Claude Code session, before and after. Name the Claude Code version and the surface (terminal app, Desktop Code tab). Say which surfaces you did not check. |
+| Behaviour: when the guard stops or asks, when pings run, what gets scored | A test in `tests/register.test.ts` that fails before your change and passes after. Say in the PR that you checked it fails without the fix. |
+| Timing: anything that waits on the clock, the store, a dialog or a turn | A test that holds that wait open and runs the competing event in the middle (a `/clear`, a resume, `/keepwarm off`, another command). Races are where most review findings come from, and a recording cannot show them. |
+| Cost: anything that changes how often pings run or what they cost | The arithmetic: pings per window and their price against one cold write. |
+
+Screenshots and recordings must be real captures of the running thing. Do not render a mock-up and present it as a screenshot. Leave out anything private on screen, such as other conversations or file paths.
+
+## Checks to run
+
+```sh
+claude plugin validate .
+claude plugin test .
+tsc -p .
+```
+
+`tsc` needs the generated declarations in `.claude-plugin/types/`; keep them untracked. Paste the pass count from `claude plugin test .` into the PR.
+
+## In the PR
+
+- Keep the title and description in step with the final diff.
+- Update the README when behaviour, commands or [What it can reach](README.md#what-it-can-reach) change, including the test count.
+- Leave the version in `.claude-plugin/plugin.json` alone. It is set at release.
