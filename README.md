@@ -48,7 +48,7 @@ In `/config`, under cache-tax:
 
 A detected cold write automatically arms at least three hours of keepwarm, the always window (six hours unless you set another) with `always` on, and prints what it cost. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
 
-Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. If a ping finds nothing to fork, a one-line note says so once, and the pings start after your next message. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns that reaches the cache leaves at least six hours of window at the default period, so any break up to six hours stays warm however long the session runs. `/keepwarm always 24h` makes that floor 24 hours instead, for every session (1h to 168h; bare `/keepwarm always` goes back to six). The same turn brings back a window that stopped, stretches a shorter one to the always window and resets a testing period; a longer window you set stays. `/keepwarm off` in any session stops every session rolling from its next turn. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
+Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. If a ping finds nothing to fork, a one-line note says so once, and the pings start after your next message. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns that reaches the cache leaves at least the always window (six hours by default) at the default period, so any break up to that window stays warm however long the session runs. `/keepwarm always 24h` makes that floor 24 hours instead, for every session (1h to 168h; bare `/keepwarm always` goes back to six). The same turn brings back a window that stopped, stretches a shorter one to the always window and resets a testing period; a longer window you set stays. `/keepwarm off` in any session stops every session rolling from its next turn. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
 
 ### A recorded warming ping
 
@@ -163,7 +163,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [223 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [224 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.

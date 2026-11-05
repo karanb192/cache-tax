@@ -533,11 +533,13 @@ function armedText(s: State, now: number, windowMs: number): string {
 }
 
 // A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
-// before deciding to open a window passes the count it read first.
-async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs) {
-  if (s.offs !== offs) return
+// before deciding to open a window passes the count it read first. An always renewal also passes the always
+// generation it read, so a /keepwarm always meanwhile wins the same way.
+async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen) {
+  const stale = () => s.offs !== offs || s.alwaysGen !== gen
+  if (stale()) return
   const now = await $.clock.now()
-  if (s.offs !== offs) return
+  if (stale()) return
   const deadline = now + windowMs
   s.every = every
   s.deadline = deadline
@@ -547,11 +549,17 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   if (every === PING_AFTER_MS) await $.store.delete(everyKey(s))
   else await $.store.set(everyKey(s), every)
   await $.store.set(deadlineKey(s), deadline)
-  if (s.offs !== offs) {
-    // Remove only what this call wrote; a window armed after the off is left alone.
+  if (stale()) {
+    // Remove only what this call wrote; a window armed after the off or the always change is left alone, and
+    // written back if this call's write landed over it.
     if ((await $.store.get(deadlineKey(s))) === deadline) {
       await $.store.delete(deadlineKey(s))
       if (!s.deadline) await $.store.delete(everyKey(s))
+      else if (s.deadline !== deadline) {
+        if (s.every === PING_AFTER_MS) await $.store.delete(everyKey(s))
+        else await $.store.set(everyKey(s), s.every)
+        await $.store.set(deadlineKey(s), s.deadline)
+      }
     }
     return
   }
@@ -896,7 +904,7 @@ export const register: Register = (on, options) => {
         s.always = shared > 0
         if (shared) s.alwaysMs = shared
       }
-      if (s.always) await startWindow($, s, Math.max(s.alwaysMs, s.deadline - now), PING_AFTER_MS, offs)
+      if (s.always) await startWindow($, s, Math.max(s.alwaysMs, s.deadline - now), PING_AFTER_MS, offs, gen)
     }
     const u = e.usage
     if (u) {

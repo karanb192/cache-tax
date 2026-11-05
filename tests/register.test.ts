@@ -2983,6 +2983,34 @@ describe('always with a window of its own, against a finishing turn and a paid c
     void clock
   })
 
+  test('shortening always while a renewal waits on the clock leaves the new window, in memory and in the store', async ($, on) => {
+    const now = START
+    let holdNext = false
+    let release = () => {}
+    let readHeld = () => {}
+    const held = new Promise<void>(r => { readHeld = r })
+    on('clock.now', async () => {
+      if (holdNext) { holdNext = false; readHeld(); await new Promise<void>(r => { release = r }) }
+      return { value: now }
+    })
+    on('clock.after', () => new Promise<{ value: void }>(() => {}))
+    const store = new Map<string, unknown>([['always', 168 * HOUR]])
+    // The renewal's clock read is the one right after its read of the always setting.
+    const w = world(on, [], { store, storeGate: async (op, key) => { if (op === 'get' && key === 'always' && armRead) { armRead = false; holdNext = true } } })
+    let armRead = false
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    armRead = true
+    const finishing = $.turn.complete(turn())
+    await held
+    await $.command.run(run('keepwarm', 'always 1h'))
+    release()
+    await finishing
+    expect(store.get('always')).toBe(HOUR)
+    expect(store.get('deadline:S1')).toBe(now + HOUR)
+    expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
+  })
+
   test('always 1h is not stretched to three hours by a paid cold write', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [warm, warm, warm, warm])
