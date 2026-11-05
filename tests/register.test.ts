@@ -425,6 +425,90 @@ describe('guard', () => {
     expect(w.logs.at(-1)).toMatch(/Sending anyway/)
   })
 
+  test('with a dollar floor, a cheaper cold send goes through with its price and is scored', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm, warm, warm, warm], { store })
+    await $.session.start(session)
+    const r = await $.command.run(run('cache-tax', 'guard refuse 5'))
+    expect(r.text).toMatch(/guard set to refuse once at \$5\.00 or more/)
+    expect(store.get('guard')).toBe(5)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/guard       refuse once at \$5\.00 or more/)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/= \$4\.01.* Sending anyway, since it is under your \$5\.00 floor/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 2000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 2k tokens paid/)
+  })
+
+  for (const [tokens, usd] of [[250000, '5.00'], [300000, '6.00']] as const) {
+    test(`with a $5 floor, a $${usd} cold send is refused once, then the resend goes through`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [], { live: { tokens } })
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', 'guard refuse 5'))
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(`= $${usd}`)
+      expect(w.entered).toEqual([])
+      expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
+  test('with a dollar floor, a model with no price row is still refused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { model: 'some-new-model' })
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard refuse 5'))
+    await $.turn.complete(turn({ usage: usage({ model: 'some-new-model' }) }))
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/= n\/a/)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const [before, after, refused] of [['claude-haiku-5-5', 'claude-fable-5-1', true], ['claude-fable-5-1', 'claude-haiku-5-5', false]] as const) {
+    test(`with a dollar floor, a switch from ${before} to ${after} is priced at the model now selected`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let model: string = before
+      const w = world(on, [], { model: () => model })
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', 'guard refuse 1'))
+      await $.turn.complete(turn({ usage: usage({ model: before }) }))
+      model = after
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit(prompt('hi'))
+      if (refused) {
+        expect(r.drop).toMatch(/= \$4\.01/)
+        expect(w.entered).toEqual([])
+      } else {
+        expect(r.drop).toBe(undefined)
+        expect(w.logs.at(-1)).toMatch(/Sending anyway, since it is under your \$1\.00 floor/)
+      }
+    })
+  }
+
+  test('the dollar floor is restored from the store, and plain refuse or warn replaces it', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['guard', 5]])
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5', 'refuse 5 0']) {
+      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes warn, refuse, or refuse with a dollar floor/)
+    }
+    expect(store.get('guard')).toBe(5)
+    await $.command.run(run('cache-tax', 'guard refuse'))
+    expect(store.get('guard')).toBe('refuse')
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('again'))).drop).toMatch(/^cache-tax:/)
+    expect(w.entered).toEqual(['hi'])
+  })
+
   test('a paid cold write is scored and arms keepwarm for three hours', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [warm, warm, warm, warm])
