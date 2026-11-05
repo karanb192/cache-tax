@@ -2583,7 +2583,7 @@ describe('ask before a cold send', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     const r = await $.command.run(run('cache-tax', 'guard test'))
-    expect(r.text).toMatch(/next prompt asks as if the cache were cold/)
+    expect(r.text).toMatch(/next prompt you send asks as if the cache were cold/)
     await $.prompt.submit(prompt('one'))
     await $.turn.complete(turn())
     await $.prompt.submit(prompt('two'))
@@ -2633,6 +2633,77 @@ describe('ask before a cold send', () => {
       expect(w.entered).toEqual(asks ? [] : ['hi'])
     })
   }
+
+  test('guard test waits for a prompt a person sent, so a notification is neither asked about nor dropped', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit({ text: 'agent finished', wait: false, origin: { kind: 'task-notification' } })).drop).toBe(undefined)
+    expect(asked.length).toBe(0)
+    expect((await $.prompt.submit(prompt('mine'))).drop).toBe('cache-tax test: not sent.')
+    expect(asked.length).toBe(1)
+    expect(w.entered).toEqual(['agent finished'])
+  })
+
+  test('/clear disarms a pending guard test', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-tax', 'guard test'))
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    await $.prompt.submit(prompt('fresh'))
+    expect(asked.length).toBe(0)
+    expect(w.entered).toEqual(['fresh'])
+  })
+
+  test('guard test into a cache that really is cold scores the write it pays', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
+  })
+
+  test('an answer that arrives after a resume moved the process sends, scores and stores nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    let sid = 'S1'
+    const w = world(on, [], { store, sid: () => sid })
+    let answer = (_: string | null) => {}
+    const asked: string[] = []
+    on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+      const q = e.questions[0]
+      asked.push(q.question)
+      const a = await new Promise<string | null>(r => { answer = r })
+      if (a === null) return { deny: 'dismissed' }
+      return { result: { questions: e.questions, answers: { [q.question]: a } } }
+    })
+    const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const pending = $.prompt.submit(prompt('hi'))
+    await settle()
+    expect(asked.length).toBe(1)
+    await $.session.end({ reason: 'resume', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    answer(null)
+    expect((await pending).drop).toMatch(/conversation changed while the question was open/)
+    expect(w.entered).toEqual([])
+    expect(store.has('acked:S2')).toBe(false)
+    expect(store.has('acked:S1')).toBe(false)
+  })
 
   test('a dismissed dialog stores the refusal, so a resend from a new process goes through', async ($, on) => {
     mock.clock(on, { now: 10 * HOUR })

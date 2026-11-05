@@ -19,6 +19,7 @@ const KEY_ACKED = 'acked'
 const ACK_SLACK_MS = 60 * 1000
 const KEY_ALWAYS = 'always'
 const KEEP_LABEL = "Don't send"
+const MOVED_TEXT = 'cache-tax: the conversation changed while the question was open, so this was not sent. Send it again.'
 const SEND_LABEL = 'Send anyway'
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
@@ -81,7 +82,7 @@ export type State = {
   statusRefresh: { cancel: () => void } | null
   last: PingRecord | null
   stopped: string | null
-  /** `/cache-tax guard test`: the next prompt asks as if the cache were cold, and nothing is scored. */
+  /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
   testOnce: boolean
   waitForTurn: boolean
   retries: number
@@ -216,6 +217,7 @@ export function resetForClear(s: State) {
   s.waitForTurn = false
   s.stepWrites = null
   s.steps = 0
+  s.testOnce = false
   outdate(s)
   disarm(s)
 }
@@ -714,7 +716,7 @@ export const register: Register = on => {
     if (words[0] === 'guard') {
       if (words[1] === 'test' && !words[2]) {
         s.testOnce = true
-        return { text: 'the next prompt asks as if the cache were cold, priced at this session\'s context; nothing is scored' }
+        return { text: 'the next prompt you send asks as if the cache were cold, priced at this session\'s context; the test scores nothing, though a send into a cache that really is cold is scored as usual' }
       }
       const floor = words[1] === 'refuse' && words[2] ? Number(words[2].replace(/^\$/, '')) : 0
       const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
@@ -734,10 +736,13 @@ export const register: Register = on => {
     await reseat($, s)
     if (typeof e.text !== 'string' || e.text.trimStart().startsWith('/')) return next(e)
     const now = await $.clock.now()
-    if (s.testOnce) {
+    // A prompt no person sent would be dropped by the question nobody answers, so the test waits for one a person sent.
+    if (s.testOnce && !UNATTENDED.has(e.origin.kind)) {
       s.testOnce = false
+      const sid = s.sid
       const send = sendLabel(s)
       const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s)} Send it anyway?`, send)
+      if (s.sid !== sid) return { drop: MOVED_TEXT }
       return answer === send ? next(e) : { drop: 'cache-tax test: not sent.' }
     }
     // Without the time of the last response nothing says whether the cache is cold: the price is shown once and the message goes through.
@@ -772,8 +777,12 @@ export const register: Register = on => {
       return next(e)
     }
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
+    const sid = s.sid
     const send = sendLabel(s)
     const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s)} Send it anyway?`, send)
+    // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
+    // answer belongs to the old one: nothing is sent, scored or stored under the new id.
+    if (s.sid !== sid) return { drop: MOVED_TEXT }
     if (answer === send) {
       s.coldWritePending = true
       return next(e)

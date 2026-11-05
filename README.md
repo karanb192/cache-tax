@@ -69,7 +69,7 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
     /cache-tax guard refuse ask before a cold send: Send anyway or Don't send (this mod's default)
     /cache-tax guard refuse 5
                             ask only at $5 or more; below that, show the price and send
-    /cache-tax guard test   ask once on the next prompt as if the cache were cold, priced at this session's context; nothing is scored
+    /cache-tax guard test   ask once on the next prompt you send as if the cache were cold, priced at this session's context; the test scores nothing, a send into a really cold cache is scored as usual
 
 The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath it:
 
@@ -154,7 +154,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [186 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [190 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
