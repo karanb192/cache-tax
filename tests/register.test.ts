@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { autoWarmFrom, fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
@@ -98,6 +98,69 @@ const bandProps: RenderPropsOf['AbovePrompt'] = {
 }
 
 describe('cache indicator', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: idle countdown refreshes without commands or extra pings`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm])
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '6h'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(11 * MIN)
+      expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/keepwarm 5h49m left · ping in 39m/)
+      expect(w.forks.length).toBe(0)
+      await clock.advance(39 * MIN)
+      expect(w.forks.length).toBe(1)
+      await clock.advance(MIN)
+      expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/keepwarm 5h09m left · ping in 49m · last ping read 200k/)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  test('the plain status countdown refreshes while idle and stops with its window', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    const afterArming = w.status.length
+    await clock.advance(11 * MIN)
+    expect(w.status.length - afterArming).toBe(11)
+    expect(w.status.at(-1)).toBe('keepwarm 5h49m left · ping in 39m')
+    await $.command.run(run('keepwarm', 'off'))
+    const afterOff = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterOff)
+    await $.command.run(run('keepwarm', '2m'))
+    await clock.advance(MIN)
+    expect(w.status.at(-1)).toBe('keepwarm 1m left · ping in 36m')
+    await clock.advance(MIN)
+    expect(w.status.at(-1)).toBe(undefined)
+    const afterExpiry = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterExpiry)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.classic.SessionStart({ source: 'clear' })
+    const afterClear = w.status.length
+    await clock.advance(2 * MIN)
+    expect(w.status.length).toBe(afterClear)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('refreshing during API backoff preserves the retry delay', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [busy, busy, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(52 * MIN)
+    expect(w.status.at(-1)).toBe('keepwarm 5h08m left · API busy, ping retry 2 of 3')
+    expect(w.forks.length).toBe(2)
+    await clock.advance(MIN)
+    expect(w.forks.length).toBe(3)
+    expect(w.status.at(-1)).toMatch(/ping in 50m · last ping read 200k/)
+  })
+
   test('redraws reuse session preferences and theme changes repaint immediately', async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
@@ -334,6 +397,75 @@ describe('guard', () => {
     expect(w.entered).toEqual(['hi'])
   })
 
+  test('a resend from a new process, as claude -p starts per turn, goes through', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    // The refused send's process stored its ack; this one rebuilds the last request time a second later.
+    const store = new Map<string, unknown>([['acked:S1', 8 * HOUR + 1000]])
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    const resend = await $.prompt.submit(prompt('hi'))
+    expect(resend.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('a refusal is stored for the next process', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    const first = await $.prompt.submit(prompt('hi'))
+    expect(first.drop).toMatch(/cache-tax: the prompt cache went cold/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+  })
+
+  test('a refusal after a long response stores when that response ended, which a resumed process rebuilds', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    for await (const c of $.turn.step({ turnId: 'long', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await clock.advance(2 * MIN)
+    await $.turn.complete(turn({ turnId: 'long', durationMs: 2 * MIN }))
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/cache-tax: the prompt cache went cold/)
+    const now = START + 2 * MIN + 3 * HOUR
+    // claude -p's next process: seconds_since_last_response counts from the response's end, not the request's start.
+    expect(store.get('acked:S1')).toBe(now - 3 * 3600 * 1000)
+  })
+
+  test('an API error without a response preserves the stored refusal identity', async ($, on) => {
+    const clock = mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000 })
+    for await (const c of $.turn.step({ turnId: 'failed', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await clock.advance(2 * MIN)
+    await $.turn.complete(turn({ turnId: 'failed', reason: 'error', isAborted: false, durationMs: 2 * MIN, usage: undefined }))
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/^cache-tax:/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 4 * 3600 + 120, context_tokens: 200000 })
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('/clear forgets the stored refusal', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    await $.prompt.submit(prompt('hi'))
+    expect(store.has('acked:S1')).toBe(true)
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
   test('lets slash commands, warm sends and small contexts through', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [])
@@ -360,6 +492,90 @@ describe('guard', () => {
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
     expect(w.logs.at(-1)).toMatch(/Sending anyway/)
+  })
+
+  test('with a dollar floor, a cheaper cold send goes through with its price and is scored', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm, warm, warm, warm], { store })
+    await $.session.start(session)
+    const r = await $.command.run(run('cache-tax', 'guard refuse 5'))
+    expect(r.text).toMatch(/guard set to ask at \$5\.00 or more/)
+    expect(store.get('guard')).toBe(5)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/guard       ask first at \$5\.00 or more/)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/= \$4\.01.* Sending anyway, since it is under your \$5\.00 floor/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 2000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 2k tokens paid/)
+  })
+
+  for (const [tokens, usd] of [[250000, '5.00'], [300000, '6.00']] as const) {
+    test(`with a $5 floor, a $${usd} cold send is refused once, then the resend goes through`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [], { live: { tokens } })
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', 'guard refuse 5'))
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(`= $${usd}`)
+      expect(w.entered).toEqual([])
+      expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
+  test('with a dollar floor, a model with no price row is still refused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { model: 'some-new-model' })
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard refuse 5'))
+    await $.turn.complete(turn({ usage: usage({ model: 'some-new-model' }) }))
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/= n\/a/)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const [before, after, refused] of [['claude-haiku-5-5', 'claude-fable-5-1', true], ['claude-fable-5-1', 'claude-haiku-5-5', false]] as const) {
+    test(`with a dollar floor, a switch from ${before} to ${after} is priced at the model now selected`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let model: string = before
+      const w = world(on, [], { model: () => model })
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', 'guard refuse 1'))
+      await $.turn.complete(turn({ usage: usage({ model: before }) }))
+      model = after
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit(prompt('hi'))
+      if (refused) {
+        expect(r.drop).toMatch(/= \$4\.01/)
+        expect(w.entered).toEqual([])
+      } else {
+        expect(r.drop).toBe(undefined)
+        expect(w.logs.at(-1)).toMatch(/Sending anyway, since it is under your \$1\.00 floor/)
+      }
+    })
+  }
+
+  test('the dollar floor is restored from the store, and plain refuse or warn replaces it', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['guard', 5]])
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5', 'refuse 5 0']) {
+      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes warn, refuse, refuse with a dollar floor such as refuse 5, or test/)
+    }
+    expect(store.get('guard')).toBe(5)
+    await $.command.run(run('cache-tax', 'guard refuse'))
+    expect(store.get('guard')).toBe('refuse')
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('again'))).drop).toMatch(/^cache-tax:/)
+    expect(w.entered).toEqual(['hi'])
   })
 
   test('a paid cold write is scored and arms keepwarm for three hours', async ($, on) => {
@@ -1012,9 +1228,11 @@ describe('ping failures', () => {
     await clock.advance(10 * MIN)
     expect(w.forks.length).toBe(1)
     expect(w.status.at(-1)).toBe('keepwarm 2h50m left · nothing to fork yet, first ping after the next turn')
+    expect(w.logs.filter(l => /nothing to fork yet/.test(l)).length).toBe(1)
     expect(store.get('deadline:S1')).toBe(13 * HOUR)
     await clock.advance(HOUR)
     expect(w.forks.length).toBe(1)
+    expect(w.logs.filter(l => /nothing to fork yet/.test(l)).length).toBe(1)
     await $.turn.complete(turn())
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(2)
@@ -1087,7 +1305,7 @@ describe('stale and late ping results', () => {
     await settle()
     await clock.advance(5 * MIN)
     expect(w.forks.length).toBe(1)
-    expect(w.status.at(-1)).toBe('keepwarm 2h10m left · waiting for the first turn after compaction')
+    expect(w.status.at(-1)).toBe('keepwarm 2h05m left · waiting for the first turn after compaction')
   })
 
   test('a 429 that lands after /clear with always on leaves the new window alone', async ($, on) => {
@@ -2393,6 +2611,337 @@ describe('always with a window of its own', () => {
       world(on, [], { store })
       await $.session.start(session)
       expect(store.has('deadline:S1')).toBe(false)
+    })
+  }
+})
+
+
+// The dialog beneath the mod: answers with a label, or null to dismiss it, and records each question and its options.
+function answering(on: On, answer: string | null) {
+  const asked: Array<{ question: string; options: string[] }> = []
+  on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
+    const q = e.questions[0]
+    asked.push({ question: q.question, options: q.options.map(o => o.label) })
+    if (answer === null) return { deny: 'dismissed' }
+    return { result: { questions: e.questions, answers: { [q.question]: answer } } }
+  })
+  return asked
+}
+
+describe('ask before a cold send', () => {
+  test('Send anyway lets the same prompt through and scores the cold write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    expect(r.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(asked.length).toBe(1)
+    expect(asked[0].question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?`)
+    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keeping the cache warm for 3h00m/)
+  })
+
+  test("Don't send drops it unpaid, and the resend asks again", async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const first = await $.prompt.submit(prompt('hi'))
+    expect(first.drop).toBe('cache-tax: not sent, nothing paid ($4.01 saved). Send it again to be asked again, or /clear and start from a note.')
+    const second = await $.prompt.submit(prompt('hi'))
+    expect(second.drop).toMatch(/^cache-tax: not sent, nothing paid/)
+    expect(w.entered).toEqual([])
+    expect(asked.length).toBe(2)
+  })
+
+  test('a dismissed dialog refuses once, and the resend goes through without asking', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, null)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const first = await $.prompt.submit(prompt('hi'))
+    expect(first.drop).toMatch(/Send it again to pay it/)
+    const second = await $.prompt.submit(prompt('hi'))
+    expect(second.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(asked.length).toBe(1)
+  })
+
+  test('warm sends are not asked about', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(30 * MIN)
+    await $.prompt.submit(prompt('warm one'))
+    expect(w.entered).toEqual(['warm one'])
+    expect(asked.length).toBe(0)
+  })
+
+  test('guard test asks once on a warm session, priced at its context, and scores nothing', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const r = await $.command.run(run('cache-tax', 'guard test'))
+    expect(r.text).toMatch(/next prompt you send asks as if the cache were cold/)
+    await $.prompt.submit(prompt('one'))
+    await $.turn.complete(turn())
+    await $.prompt.submit(prompt('two'))
+    expect(w.entered).toEqual(['one', 'two'])
+    expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?`])
+    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    const card = await $.command.run(run('cache-tax', 'status'))
+    expect(card.text).toMatch(/session     0 cold writes paid/)
+  })
+
+  test('an unpriced model is asked with a bare Send anyway and no savings figure', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { model: 'some-future-model' })
+    const asked = answering(on, 'Send anyway')
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'some-future-model' }) }))
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(w.entered).toEqual(['hi'])
+    expect(asked[0].options).toEqual(['Send anyway', "Don't send"])
+    expect(asked[0].question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm holds the cache for 3h00m\. Send it anyway\?$/)
+  })
+
+  test("guard test with Don't send drops the prompt", async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    answering(on, "Don't send")
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard test'))
+    const r = await $.prompt.submit(prompt('one'))
+    expect(r.drop).toBe('cache-tax test: not sent.')
+    expect(w.entered).toEqual([])
+  })
+
+  for (const [floor, asks] of [[5, false], [4, true]] as const) {
+    test(`with a $${floor} floor, a $4.01 cold send is ${asks ? '' : 'not '}asked about`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      const asked = answering(on, "Don't send")
+      await $.session.start(session)
+      await $.command.run(run('cache-tax', `guard refuse ${floor}`))
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit(prompt('hi'))
+      expect(asked.length).toBe(asks ? 1 : 0)
+      expect(r.drop).toBe(asks ? 'cache-tax: not sent, nothing paid ($4.01 saved). Send it again to be asked again, or /clear and start from a note.' : undefined)
+      expect(w.entered).toEqual(asks ? [] : ['hi'])
+    })
+  }
+
+  test('guard test waits for a prompt a person sent, so a notification is neither asked about nor dropped', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit({ text: 'agent finished', wait: false, origin: { kind: 'task-notification' } })).drop).toBe(undefined)
+    expect(asked.length).toBe(0)
+    expect((await $.prompt.submit(prompt('mine'))).drop).toBe('cache-tax test: not sent.')
+    expect(asked.length).toBe(1)
+    expect(w.entered).toEqual(['agent finished'])
+  })
+
+  test('/clear disarms a pending guard test', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-tax', 'guard test'))
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    await $.prompt.submit(prompt('fresh'))
+    expect(asked.length).toBe(0)
+    expect(w.entered).toEqual(['fresh'])
+  })
+
+  test('guard test into a cache that really is cold scores the write it pays', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
+  })
+
+  test('guard test into a cold cache scores a partial rewrite as the cold write it is', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.command.run(run('cache-tax', 'guard test'))
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 160000, cache_creation_input_tokens: 40000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
+  })
+
+  test('guard test prices the send at the model selected now', async ($, on) => {
+    mock.clock(on, { now: START })
+    let model = 'claude-haiku-5-5'
+    world(on, [], { model: () => model })
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    model = 'claude-fable-5-1'
+    await $.command.run(run('cache-tax', 'guard test'))
+    await $.prompt.submit(prompt('hi'))
+    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+  })
+
+  test('an answer that arrives after a resume moved the process sends, scores and stores nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    let sid = 'S1'
+    const w = world(on, [], { store, sid: () => sid })
+    let answer = (_: string | null) => {}
+    const asked: string[] = []
+    on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+      const q = e.questions[0]
+      asked.push(q.question)
+      const a = await new Promise<string | null>(r => { answer = r })
+      if (a === null) return { deny: 'dismissed' }
+      return { result: { questions: e.questions, answers: { [q.question]: a } } }
+    })
+    const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const pending = $.prompt.submit(prompt('hi'))
+    await settle()
+    expect(asked.length).toBe(1)
+    await $.session.end({ reason: 'resume', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    answer(null)
+    expect((await pending).drop).toMatch(/conversation changed while the question was open/)
+    expect(w.entered).toEqual([])
+    expect(store.has('acked:S2')).toBe(false)
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('a dismissed dialog stores the refusal, so a resend from a new process goes through', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    answering(on, null)
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/Send it again to pay it/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+  })
+})
+
+describe('the Auto keepwarm option', () => {
+  const off = { options: { autoWarm: 'off' } }
+
+  test('is on unless it is off', async () => {
+    expect(autoWarmFrom(undefined)).toBe(true)
+    expect(autoWarmFrom({})).toBe(true)
+    expect(autoWarmFrom({ autoWarm: 'on' })).toBe(true)
+    expect(autoWarmFrom({ autoWarm: 'off' })).toBe(false)
+  })
+
+  test('off: a paid cold write is scored but does not arm keepwarm, and the refusal says so', off, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/Send it again to pay it, and keepwarm stays off \(\/keepwarm to arm it\)\. Or \/clear/)
+    await $.prompt.submit(prompt('hi'))
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)/)
+    expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm/)
+    await clock.advance(2 * HOUR)
+    expect(w.forks.length).toBe(0)
+    expect((await $.command.run(run('cache-tax', 'status'))).text).toMatch(/session     1 cold write paid, \$4\.01/)
+  })
+
+  test('off: the question says keepwarm stays off after Send anyway', off, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(asked[0].question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Send it anyway\?$/)
+  })
+
+  test('off: a window armed by hand is promised until its deadline, and keeps pinging after a paid cold write', off, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm, warm, warm])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    await $.command.run(run('keepwarm', '90m'))
+    await clock.advance(20 * MIN)
+    const forks = w.forks.length
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm holds the cache for 1h10m at about/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
+    expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm/)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(forks + 1)
+  })
+
+  test('off: always still renews for six hours after a paid cold write and keeps pinging', off, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm, warm, warm, warm, warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', 'always'))
+    await $.command.run(run('cache-tax', 'guard warn'))
+    await clock.advance(7 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(w.logs.at(-1)).toMatch(/Sending anyway; keepwarm will hold the cache for 6h00m once it lands/)
+    const forks = w.forks.length
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.status.at(-1)).toMatch(/^keepwarm 6h00m left/)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(forks + 1)
+  })
+})
+
+describe('always with a window of its own, beside the guard question', () => {
+  for (const options of [{}, { autoWarm: 'off' }] as Record<string, string>[]) {
+    test(`the question promises the always window (autoWarm ${JSON.stringify(options)})`, { options }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      world(on, [warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm, warm])
+      const asked = answering(on, "Don't send")
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', 'always 24h'))
+      // Pings hold the cache through the 24h window; it goes cold an hour after they stop.
+      await clock.advance(25 * HOUR)
+      await $.prompt.submit(prompt('hi'))
+      expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm holds the cache for 24h00m at about/)
     })
   }
 })
