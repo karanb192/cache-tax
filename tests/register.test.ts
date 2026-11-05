@@ -2799,6 +2799,60 @@ describe('ask before a cold send', () => {
     expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
   })
 
+  test('guard test answered after the cache went cold meanwhile scores the write it pays', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    let answer = (_: string) => {}
+    let opened = () => {}
+    const open = new Promise<void>(r => { opened = r })
+    on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
+      const q = e.questions[0]
+      const a = await new Promise<string>(r => { answer = r; opened() })
+      return { result: { questions: e.questions, answers: { [q.question]: a } } }
+    })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(59 * MIN)
+    await $.command.run(run('cache-tax', 'guard test'))
+    const pending = $.prompt.submit(prompt('hi'))
+    await open
+    await clock.advance(2 * MIN)
+    answer('Send anyway ($4.01)')
+    expect((await pending).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 160000, cache_creation_input_tokens: 40000 }) }))
+    expect(w.logs.at(-1)).toMatch(/cold write of 40k tokens paid/)
+  })
+
+  test('a /clear while guard test reads the clock after the answer sends nothing', async ($, on) => {
+    let hold: Promise<void> | null = null
+    let releaseClock = () => {}
+    let readHeld = () => {}
+    const reading = new Promise<void>(r => { readHeld = r })
+    on('clock.now', async () => {
+      const h = hold
+      hold = null
+      if (h) { readHeld(); await h }
+      return { value: START }
+    })
+    on('clock.after', () => new Promise<{ value: void }>(() => {}))
+    const w = world(on, [])
+    on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
+      const q = e.questions[0]
+      // The mod's next clock read, the one after the answer, is held.
+      hold = new Promise<void>(r => { releaseClock = r })
+      return { result: { questions: e.questions, answers: { [q.question]: 'Send anyway ($4.01)' } } }
+    })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-tax', 'guard test'))
+    const pending = $.prompt.submit(prompt('hi'))
+    await reading
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    releaseClock()
+    expect((await pending).drop).toMatch(/conversation changed while the question was open/)
+    expect(w.entered).toEqual([])
+  })
+
   test('guard test prices the send at the model selected now', async ($, on) => {
     mock.clock(on, { now: START })
     let model = 'claude-haiku-5-5'
@@ -2818,20 +2872,21 @@ describe('ask before a cold send', () => {
     let sid = 'S1'
     const w = world(on, [], { store, sid: () => sid })
     let answer = (_: string | null) => {}
+    let opened = () => {}
+    const open = new Promise<void>(r => { opened = r })
     const asked: string[] = []
     on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
       const q = e.questions[0]
       asked.push(q.question)
-      const a = await new Promise<string | null>(r => { answer = r })
+      const a = await new Promise<string | null>(r => { answer = r; opened() })
       if (a === null) return { deny: 'dismissed' }
       return { result: { questions: e.questions, answers: { [q.question]: a } } }
     })
-    const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
     await $.session.start(session)
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     const pending = $.prompt.submit(prompt('hi'))
-    await settle()
+    await open
     expect(asked.length).toBe(1)
     await $.session.end({ reason: 'resume', sessionId: 'S1', resume: { id: 'S1' } })
     sid = 'S2'

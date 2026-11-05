@@ -786,10 +786,13 @@ export const register: Register = (on, options) => {
       const sid = s.sid
       const send = sendLabel(s)
       const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s, now)} Send it anyway?`, send)
+      // The answer can take minutes, and the cache may have gone cold while the question was open. The clock is read
+      // before the conversation check, so nothing awaits between that check and the send.
+      const answeredAt = await $.clock.now()
       if (s.sid !== sid) return { drop: MOVED_TEXT }
       if (answer !== send) return { drop: 'cache-tax test: not sent.' }
       // A test that lands on a cache that really is cold pays like any cold send, so it is scored like one.
-      if (isCold(s, now) && s.ctx >= BIG_TOKENS) s.coldWritePending = true
+      if (isCold(s, answeredAt) && s.ctx >= BIG_TOKENS) s.coldWritePending = true
       return next(e)
     }
     // Without the time of the last response nothing says whether the cache is cold: the price is shown once and the message goes through.
