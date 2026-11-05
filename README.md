@@ -145,6 +145,8 @@ From a local checkout, load it for one session:
 
 To keep it installed, use the [marketplace commands](#install).
 
+Sending a change? [CONTRIBUTING.md](CONTRIBUTING.md) says what evidence a PR needs.
+
 ## Prove it on your own session
 
 The mock-clock tests prove the timer, the guard and the scoring, not that a fork hits the main cache. One ping proves that, and it costs a cache read plus the answer. In any warm session:
