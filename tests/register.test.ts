@@ -436,6 +436,24 @@ describe('guard', () => {
     expect(store.get('acked:S1')).toBe(now - 3 * 3600 * 1000)
   })
 
+  test('an API error without a response preserves the stored refusal identity', async ($, on) => {
+    const clock = mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>()
+    const w = world(on, [], { store })
+    await $.session.start(session)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000 })
+    for await (const c of $.turn.step({ turnId: 'failed', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
+    await clock.advance(2 * MIN)
+    await $.turn.complete(turn({ turnId: 'failed', reason: 'error', isAborted: false, durationMs: 2 * MIN, usage: undefined }))
+    await clock.advance(2 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/^cache-tax:/)
+    expect(store.get('acked:S1')).toBe(8 * HOUR)
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 4 * 3600 + 120, context_tokens: 200000 })
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
   test('/clear forgets the stored refusal', async ($, on) => {
     mock.clock(on, { now: 10 * HOUR })
     const store = new Map<string, unknown>()

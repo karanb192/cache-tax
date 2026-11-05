@@ -774,7 +774,7 @@ export const register: Register = on => {
     // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
     // A turn aborted before it sent anything touched no cache, so it leaves the clock alone.
     if ((e.usage || !e.isAborted) && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
-    if (e.usage || !e.isAborted) s.lastResponseAt = now
+    if (e.usage || (!e.isAborted && e.reason !== 'error')) s.lastResponseAt = now
     const compacted = s.compacted
     s.compacted = false
     if (s.lastRequestAt) s.resumedAt = 0

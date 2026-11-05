@@ -149,9 +149,9 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [175 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [176 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
-- **Guard:** refuse once and resend, including from a new process, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
+- **Guard:** refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
 - **Managed plugins above the mod:** `/clear`, resume, a restored window and compaction with the classic and compaction events continued beneath the user tier, the same events delivered twice or out of order without a second window, warning or reset, a window and a model change carried through an in-process resume, a transcript that turns old enough to be cold after its resume, a rewind told apart from a compaction, a summary write that is no cold write beside a cold write that is (a guarded send compacted before its first request, two compactions in one turn), an end of the old conversation that overlaps or outlasts the classic resume, and a `/keepwarm` run before the host reports the next conversation's id.
