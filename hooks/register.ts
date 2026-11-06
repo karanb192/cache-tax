@@ -660,7 +660,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    headless = e.surface === null
+    headless = !e.isInteractive
     s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
@@ -839,7 +839,7 @@ export const register: Register = (on, options) => {
     const guard = s.guard
     const under = guard !== 'warn' && usd != null && usd < guard
     if (guard === 'warn' || unattended || under) {
-      const why = unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
+      const why = unattended ? `, since this ${headless ? 'headless' : e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
       $.ui.log(`${guardText(s, now)} Sending anyway${why}; ${holdNote(s, now, false)}.`)
       s.coldWritePending = true
       return next(e)
