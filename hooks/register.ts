@@ -11,6 +11,9 @@ const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
 const MAX_ALWAYS_MS = 168 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
+/** A warm ping reads the prefix and writes only its own message: a write of this share of the read or more means the prefix broke. */
+const WARM_WRITE_SHARE = 0.1
+const DEFAULT_PING_FLOOR = 2
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
@@ -57,7 +60,7 @@ const LONG_PRICES: Array<[string, number, number, number]> = [
   ['haiku-5-5', 0.05, 1, 2.5],
 ]
 
-type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
+type PingRecord = { at: number; read: number; write: number; input: number; output: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
@@ -86,6 +89,10 @@ export type State = {
   pending: { cancel: () => void } | null
   statusRefresh: { cancel: () => void } | null
   last: PingRecord | null
+  /** This idle stretch's ping was skipped, its rewrite under the ping floor: the window waits for the cold mark or the next turn. */
+  skipping: boolean
+  /** The skip was said in this window; said again only after a ping goes out, the window stops or the conversation ends. */
+  skipSaid: boolean
   stopped: string | null
   /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
   testOnce: boolean
@@ -230,6 +237,10 @@ export function resetForClear(s: State) {
   s.stepWrites = null
   s.steps = 0
   s.testOnce = false
+  // The last receipt priced the old conversation's context; the next one's first ping makes its own.
+  s.last = null
+  s.skipping = false
+  s.skipSaid = false
   outdate(s)
   disarm(s)
 }
@@ -279,6 +290,7 @@ function statusText(s: State, now: number): string | undefined {
     : s.compacted ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : s.waitForTurn ? ' · nothing to fork yet, first ping after the next turn'
+    : s.skipping ? ` · ping skipped, the rewrite (${fmtUsd(coldUsd(s))}) is under ${pingFloor}x a ping`
     : s.retries ? ` · API busy, ping retry ${s.retries} of ${MAX_RETRIES}`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
@@ -369,6 +381,8 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
   s.every = PING_AFTER_MS
   s.stopped = why
   s.retries = 0
+  s.skipping = false
+  s.skipSaid = false
   outdate(s)
   disarm(s)
   await $.store.delete(deadlineKey(s))
@@ -438,8 +452,8 @@ async function arm($: EngineInterface, s: State) {
   // A cold window still needs expiry cleanup, but must not send a model request.
   if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
     const untilCold = s.lastRequestAt + TTL_MS - now
-    // Waiting for a turn sends nothing, but wakes when the cache goes cold so the row says so.
-    if (s.waitForTurn) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
+    // Waiting for a turn, or past a skipped ping, sends nothing, but wakes when the cache goes cold so the row says so.
+    if (s.waitForTurn || s.skipping) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
     else {
       const delay = Math.min(s.deadline - now, untilCold, Math.max(1000, s.lastRequestAt + s.every - now))
       s.pending = $.clock.after(delay, () => { void ping($, s) })
@@ -468,6 +482,12 @@ async function ping($: EngineInterface, s: State) {
   if (now - s.lastRequestAt < s.every - 1000) return arm($, s)
   // A host that slept past a retry's slot must not send it inside the last minute.
   if (s.retries && now >= s.lastRequestAt + TTL_MS - MIN_PING_MS) return stop($, s, s.retryReason + afterRetries(s.retries))
+  if (underFloor(s)) {
+    if (!s.skipSaid) $.ui.log(skipText(s))
+    s.skipSaid = true
+    s.skipping = true
+    return arm($, s)
+  }
   const gen = s.gen
   const sentAt = s.lastRequestAt
   s.inFlight = true
@@ -508,13 +528,39 @@ async function ping($: EngineInterface, s: State) {
   }
   const u = reply.usage
   const price = priceOf(s.lastModel, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
-  // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
-  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
+  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < WARM_WRITE_SHARE * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
-  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
+  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, output: u.output_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
+  s.skipSaid = false
   s.lastRequestAt = now
   await arm($, s)
+}
+
+/**
+ * What the next ping would cost: the last warm ping's own tokens (its prompt, its write and its answer) plus a read of
+ * today's context, at today's model's prices. The receipt's dollars priced the context and model of its own moment, which a
+ * compaction or a /model since then changed; its write is capped at what a warm ping can write against today's context.
+ * A ping that found the cache gone paid a rewrite, so it is no receipt.
+ */
+function nextPingUsd(s: State): number | null {
+  const last = s.last
+  const price = priceOf(s.lastModel, s.ctx)
+  if (!last?.warm || !price) return null
+  const write = Math.min(last.write, WARM_WRITE_SHARE * s.ctx)
+  return pingUsd({ cache_read_input_tokens: s.ctx, cache_creation_input_tokens: write, input_tokens: last.input, output_tokens: last.output }, price)
+}
+
+/** Whether the rewrite a ping saves costs less than the Ping floor times the ping. With no receipt yet, or no context to price, the ping goes out. */
+function underFloor(s: State): boolean {
+  const rewrite = coldUsd(s)
+  const ping = nextPingUsd(s)
+  return pingFloor > 0 && s.ctx > 0 && rewrite != null && ping != null && rewrite < pingFloor * ping
+}
+
+function skipText(s: State): string {
+  return `keepwarm skipped a ping: re-writing this context costs about ${fmtUsd(coldUsd(s))}, less than ${pingFloor}x a ping (about ${fmtUsd(nextPingUsd(s))}), ` +
+    `so the cache is left to go cold. Each later ping is checked the same way. The Ping floor option sets the ${pingFloor}x; 0 never skips.`
 }
 
 function afterRetries(n: number): string {
@@ -534,6 +580,15 @@ let autoWarm = true
 
 /** Reads the "autoWarm" option: anything but "off" keeps the default, on. */
 export const autoWarmFrom = (options: Record<string, unknown> | undefined): boolean => options?.autoWarm !== 'off'
+
+/** The "Ping floor" option: a ping goes out only while the rewrite costs at least this many times the ping; 0 never skips. Set in register. */
+let pingFloor = DEFAULT_PING_FLOOR
+
+/** Reads the "pingFloor" option: a number of 0 or more, else the default. */
+export const pingFloorFrom = (options: Record<string, unknown> | undefined): number => {
+  const value = options?.pingFloor
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : DEFAULT_PING_FLOOR
+}
 
 /** Whether a paid cold write leaves keepwarm holding the cache: always on, the Auto keepwarm option, or a window armed by hand. */
 function holds(s: State, now: number): boolean {
@@ -605,13 +660,14 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
-    resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
+    resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, skipping: false, skipSaid: false, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
   }
 }
 
 export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
+  pingFloor = pingFloorFrom(options)
   const s = freshState()
   let light = false
   let noColor = false
@@ -911,6 +967,7 @@ export const register: Register = (on, options) => {
     s.compacted = false
     if (s.lastRequestAt) s.resumedAt = 0
     s.waitForTurn = false
+    s.skipping = false
     s.ackedAt = 0
     // Always covers any break up to its window (six hours unless /keepwarm always <window> set another) after a turn
     // that reached the cache (a turn that failed before any response touched nothing, and its cache may be cold): a
