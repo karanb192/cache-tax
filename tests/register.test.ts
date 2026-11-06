@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { autoWarmFrom, fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { autoWarmFrom, fmtDuration, freshState, parseDuration, pingFloorFrom, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
@@ -3117,5 +3117,136 @@ describe('$.cacheTax noun', () => {
     expect(await read()).toMatchObject({ always: true, alwaysMs: 24 * HOUR, guard: 'refuse', guardFloorUsd: 5 })
     await $.command.run(run('cache-tax', 'guard warn'))
     expect(await read()).toMatchObject({ guard: 'warn', guardFloorUsd: null })
+  })
+})
+
+describe('skipping a ping that costs more than the rewrite it saves', () => {
+  // 20k of context re-writes for $0.40 on Fable 5.1. A ping that reads it and thinks 5,000 tokens costs $0.26, and twice
+  // that is more than the rewrite; one that answers in a token costs half a cent.
+  const small = { live: { tokens: 20000 } }
+  const dear: ForkAnswer = { read: 20000, write: 0, out: 5000 }
+  const cheap: ForkAnswer = { read: 20000, write: 0, out: 1 }
+  const skipped = (logs: string[]) => logs.filter(line => /skipped a ping/.test(line))
+
+  test('the Ping floor is a number of 0 or more, else 2', async () => {
+    expect(pingFloorFrom(undefined)).toBe(2)
+    expect(pingFloorFrom({})).toBe(2)
+    expect(pingFloorFrom({ pingFloor: 0 })).toBe(0)
+    expect(pingFloorFrom({ pingFloor: 1.5 })).toBe(1.5)
+    expect(pingFloorFrom({ pingFloor: -1 })).toBe(2)
+    expect(pingFloorFrom({ pingFloor: '3' })).toBe(2)
+  })
+
+  test('skips the ping when the rewrite is under twice the last ping, says why, and lets the cache go cold', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    // No receipt yet: the first ping always goes out.
+    expect(w.forks.length).toBe(1)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs)).toEqual(['keepwarm skipped a ping: re-writing this context costs about $0.40, less than 2x the last ping ($0.26), so the cache is left to go cold. Each later ping is checked the same way. The Ping floor option sets the 2x; 0 never skips.'])
+    expect(w.status.at(-1)).toBe('keepwarm 4h20m left · ping skipped, the rewrite ($0.40) is under 2x the last ping · last ping read 20k $0.26')
+    // The skip waits for the cold mark, an hour after the last ping, and sends nothing on the way.
+    await clock.advance(10 * MIN)
+    expect(w.status.at(-1)).toMatch(/· cold now, first ping 50m after the next turn/)
+    await clock.advance(3 * HOUR)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('pings when the rewrite is over twice the last ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [cheap, cheap, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(150 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(skipped(w.logs)).toEqual([])
+  })
+
+  test('says the reason once, not on every skipped tick', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(skipped(w.logs).length).toBe(1)
+    // Each turn opens a new idle stretch, checked again against the same receipt: skipped, and not said again.
+    for (let i = 0; i < 2; i++) {
+      await clock.advance(5 * MIN)
+      await $.turn.complete(turn())
+      await clock.advance(50 * MIN)
+      expect(w.status.at(-1)).toMatch(/· ping skipped/)
+    }
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(1)
+  })
+
+  test('the Ping floor option sets the multiple', { options: { pingFloor: 100 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [cheap, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs)[0]).toMatch(/costs about \$0\.40, less than 100x the last ping \(\$0\.01\)/)
+  })
+
+  test('a Ping floor of 0 never skips', { options: { pingFloor: 0 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(150 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(skipped(w.logs)).toEqual([])
+  })
+
+  test('/keepwarm off while a skip waits for the cold mark: nothing pings, and a later window says it again', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(skipped(w.logs).length).toBe(1)
+    await clock.advance(5 * MIN)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(w.status.at(-1)).toBe(undefined)
+    await clock.advance(HOUR)
+    expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(2)
+  })
+
+  test('/clear while a skip waits: the receipt priced the old conversation, so the new one\'s first ping goes out', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    let sid = 'S1'
+    const w = world(on, [dear, dear], { ...small, store, sid: () => sid })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(100 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(1)
+    await clock.advance(5 * MIN)
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear' })
+    await $.prompt.submit(prompt('hello'))
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(2)
+    expect(w.status.at(-1)).toMatch(/· ping in 50m · last ping read 20k \$0\.26/)
   })
 })

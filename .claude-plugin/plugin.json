@@ -16,6 +16,13 @@
         "on",
         "off"
       ]
+    },
+    "pingFloor": {
+      "type": "number",
+      "title": "Ping floor",
+      "description": "A keepwarm ping goes out only when re-writing the context would cost at least this many times the last ping. 2 by default; 0 never skips a ping.",
+      "default": 2,
+      "min": 0
     }
   },
   "types": "./types/index.d.ts"
