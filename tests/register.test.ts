@@ -11,7 +11,7 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
 
-const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
+const session: SessionStartInput = { surface: null, isInteractive: true, cwd: '/work' }
 
 const usage = (over: Partial<TurnUsage> = {}): TurnUsage => ({
   input_tokens: 2, output_tokens: 10, cache_read_input_tokens: 200000, cache_creation_input_tokens: 500, model: 'claude-fable-5-1', ...over,
@@ -1184,6 +1184,20 @@ describe('always after /clear', () => {
 })
 
 describe('guard by origin', () => {
+  test('a cold headless typed prompt is sent and scored', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, isInteractive: false })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    expect(r.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/Sending anyway, since this headless prompt cannot be sent again/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid/)
+  })
+
   for (const kind of ['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'observer'] as const) {
     test(`a cold ${kind} prompt is sent and scored, and the next typed prompt is still refused`, async ($, on) => {
       const clock = mock.clock(on, { now: START })
