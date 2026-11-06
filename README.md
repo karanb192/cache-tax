@@ -168,10 +168,10 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [239 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [240 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
-- **Ping floor option:** a ping is skipped when the rewrite costs less than twice the last ping and goes out when it costs more, the reason is said once across skipped stretches, the ping is priced at today's context and model after a compaction or a model switch, an unknown context is never a cheap rewrite, the option sets the multiple and 0 never skips, `/keepwarm off` during a skip leaves nothing pinging, and `/clear` during a skip drops the old receipt so the new conversation's first ping goes out.
+- **Ping floor option:** a ping is skipped when the rewrite costs less than twice a ping and goes out when it costs more, the reason is said once across skipped stretches, the ping is priced at today's context and model after a compaction (its old cache write capped too) or a model switch, an unknown context is never a cheap rewrite, the option sets the multiple and 0 never skips, `/keepwarm off` during a skip leaves nothing pinging, and `/clear` during a skip drops the old receipt so the new conversation's first ping goes out.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always with its own window and the windows it refuses, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.

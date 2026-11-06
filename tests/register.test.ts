@@ -3228,6 +3228,24 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(w.forks.length).toBe(2)
   })
 
+  test('after a compaction, the last ping\'s cache write is capped at what a warm ping writes against the smaller context', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live = { tokens: 400000 }
+    // Still warm: a write under a tenth of the read.
+    const w = world(on, [{ read: 400000, write: 30000 }, { read: 40000, write: 0 }], { live })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = 40000
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
   test('after a switch to a cheaper model, a ping is priced at the new model, not at the old receipt', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [{ read: 80000, write: 0 }, { read: 80000, write: 0 }], { live: { tokens: 80000 }, model: 'claude-opus-5' })

@@ -11,6 +11,9 @@ const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
 const MAX_ALWAYS_MS = 168 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
+/** A warm ping reads the prefix and writes only its own message: a write of this share of the read or more means the prefix broke. */
+const WARM_WRITE_SHARE = 0.1
+const DEFAULT_PING_FLOOR = 2
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
@@ -525,8 +528,7 @@ async function ping($: EngineInterface, s: State) {
   }
   const u = reply.usage
   const price = priceOf(s.lastModel, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
-  // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
-  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
+  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < WARM_WRITE_SHARE * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
   s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, output: u.output_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
@@ -538,13 +540,15 @@ async function ping($: EngineInterface, s: State) {
 /**
  * What the next ping would cost: the last warm ping's own tokens (its prompt, its write and its answer) plus a read of
  * today's context, at today's model's prices. The receipt's dollars priced the context and model of its own moment, which a
- * compaction or a /model since then changed. A ping that found the cache gone paid a rewrite, so it is no receipt.
+ * compaction or a /model since then changed; its write is capped at what a warm ping can write against today's context.
+ * A ping that found the cache gone paid a rewrite, so it is no receipt.
  */
 function nextPingUsd(s: State): number | null {
   const last = s.last
   const price = priceOf(s.lastModel, s.ctx)
   if (!last?.warm || !price) return null
-  return pingUsd({ cache_read_input_tokens: s.ctx, cache_creation_input_tokens: last.write, input_tokens: last.input, output_tokens: last.output }, price)
+  const write = Math.min(last.write, WARM_WRITE_SHARE * s.ctx)
+  return pingUsd({ cache_read_input_tokens: s.ctx, cache_creation_input_tokens: write, input_tokens: last.input, output_tokens: last.output }, price)
 }
 
 /** Whether the rewrite a ping saves costs less than the Ping floor times the ping. With no receipt yet, or no context to price, the ping goes out. */
@@ -576,8 +580,6 @@ let autoWarm = true
 
 /** Reads the "autoWarm" option: anything but "off" keeps the default, on. */
 export const autoWarmFrom = (options: Record<string, unknown> | undefined): boolean => options?.autoWarm !== 'off'
-
-const DEFAULT_PING_FLOOR = 2
 
 /** The "Ping floor" option: a ping goes out only while the rewrite costs at least this many times the ping; 0 never skips. Set in register. */
 let pingFloor = DEFAULT_PING_FLOOR
