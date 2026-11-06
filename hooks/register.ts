@@ -613,6 +613,7 @@ export function freshState(): State {
 export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
   const s = freshState()
+  let headless = false
   let light = false
   let noColor = false
 
@@ -659,6 +660,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    headless = e.surface === null
     s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
@@ -830,8 +832,8 @@ export const register: Register = (on, options) => {
     // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
     const model = await $.session.model()
     if (model) s.lastModel = model
-    // A refused prompt that no person sent would be lost: nobody is there to send it again.
-    const unattended = UNATTENDED.has(e.origin.kind)
+    // Headless runs and prompts no person sent have nobody to send them again.
+    const unattended = headless || UNATTENDED.has(e.origin.kind)
     // A model with no price row has no estimate to compare, so the floor never lets it through.
     const usd = coldUsd(s)
     const guard = s.guard
