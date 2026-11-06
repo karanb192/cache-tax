@@ -57,7 +57,7 @@ const LONG_PRICES: Array<[string, number, number, number]> = [
   ['haiku-5-5', 0.05, 1, 2.5],
 ]
 
-type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
+type PingRecord = { at: number; read: number; write: number; input: number; output: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
@@ -287,7 +287,7 @@ function statusText(s: State, now: number): string | undefined {
     : s.compacted ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : s.waitForTurn ? ' · nothing to fork yet, first ping after the next turn'
-    : s.skipping ? ` · ping skipped, the rewrite (${fmtUsd(coldUsd(s))}) is under ${pingFloor}x the last ping`
+    : s.skipping ? ` · ping skipped, the rewrite (${fmtUsd(coldUsd(s))}) is under ${pingFloor}x a ping`
     : s.retries ? ` · API busy, ping retry ${s.retries} of ${MAX_RETRIES}`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
@@ -528,27 +528,34 @@ async function ping($: EngineInterface, s: State) {
   // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
   const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
-  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
+  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, output: u.output_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
   s.skipSaid = false
   s.lastRequestAt = now
   await arm($, s)
 }
 
-/** The last warm ping's cost. A ping that found the cache gone paid a rewrite, not a ping, so it is no receipt. */
-function receiptUsd(s: State): number | null {
-  return s.last?.warm ? s.last.usd : null
+/**
+ * What the next ping would cost: the last warm ping's own tokens (its prompt, its write and its answer) plus a read of
+ * today's context, at today's model's prices. The receipt's dollars priced the context and model of its own moment, which a
+ * compaction or a /model since then changed. A ping that found the cache gone paid a rewrite, so it is no receipt.
+ */
+function nextPingUsd(s: State): number | null {
+  const last = s.last
+  const price = priceOf(s.lastModel, s.ctx)
+  if (!last?.warm || !price) return null
+  return pingUsd({ cache_read_input_tokens: s.ctx, cache_creation_input_tokens: last.write, input_tokens: last.input, output_tokens: last.output }, price)
 }
 
-/** Whether the rewrite a ping saves costs less than the Ping floor times the last receipt. With no receipt yet the ping goes out and makes one. */
+/** Whether the rewrite a ping saves costs less than the Ping floor times the ping. With no receipt yet, or no context to price, the ping goes out. */
 function underFloor(s: State): boolean {
   const rewrite = coldUsd(s)
-  const receipt = receiptUsd(s)
-  return pingFloor > 0 && rewrite != null && receipt != null && rewrite < pingFloor * receipt
+  const ping = nextPingUsd(s)
+  return pingFloor > 0 && s.ctx > 0 && rewrite != null && ping != null && rewrite < pingFloor * ping
 }
 
 function skipText(s: State): string {
-  return `keepwarm skipped a ping: re-writing this context costs about ${fmtUsd(coldUsd(s))}, less than ${pingFloor}x the last ping (${fmtUsd(receiptUsd(s))}), ` +
+  return `keepwarm skipped a ping: re-writing this context costs about ${fmtUsd(coldUsd(s))}, less than ${pingFloor}x a ping (about ${fmtUsd(nextPingUsd(s))}), ` +
     `so the cache is left to go cold. Each later ping is checked the same way. The Ping floor option sets the ${pingFloor}x; 0 never skips.`
 }
 
@@ -570,13 +577,15 @@ let autoWarm = true
 /** Reads the "autoWarm" option: anything but "off" keeps the default, on. */
 export const autoWarmFrom = (options: Record<string, unknown> | undefined): boolean => options?.autoWarm !== 'off'
 
-/** The "Ping floor" option: a ping goes out only while the rewrite costs at least this many times the last ping; 0 never skips. Set in register. */
-let pingFloor = 2
+const DEFAULT_PING_FLOOR = 2
 
-/** Reads the "pingFloor" option: a number of 0 or more, else the default 2. */
+/** The "Ping floor" option: a ping goes out only while the rewrite costs at least this many times the ping; 0 never skips. Set in register. */
+let pingFloor = DEFAULT_PING_FLOOR
+
+/** Reads the "pingFloor" option: a number of 0 or more, else the default. */
 export const pingFloorFrom = (options: Record<string, unknown> | undefined): number => {
   const value = options?.pingFloor
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 2
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : DEFAULT_PING_FLOOR
 }
 
 /** Whether a paid cold write leaves keepwarm holding the cache: always on, the Auto keepwarm option, or a window armed by hand. */

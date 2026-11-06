@@ -3148,8 +3148,8 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(w.forks.length).toBe(1)
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(1)
-    expect(skipped(w.logs)).toEqual(['keepwarm skipped a ping: re-writing this context costs about $0.40, less than 2x the last ping ($0.26), so the cache is left to go cold. Each later ping is checked the same way. The Ping floor option sets the 2x; 0 never skips.'])
-    expect(w.status.at(-1)).toBe('keepwarm 4h20m left · ping skipped, the rewrite ($0.40) is under 2x the last ping · last ping read 20k $0.26')
+    expect(skipped(w.logs)).toEqual(['keepwarm skipped a ping: re-writing this context costs about $0.40, less than 2x a ping (about $0.26), so the cache is left to go cold. Each later ping is checked the same way. The Ping floor option sets the 2x; 0 never skips.'])
+    expect(w.status.at(-1)).toBe('keepwarm 4h20m left · ping skipped, the rewrite ($0.40) is under 2x a ping · last ping read 20k $0.26')
     // The skip waits for the cold mark, an hour after the last ping, and sends nothing on the way.
     await clock.advance(10 * MIN)
     expect(w.status.at(-1)).toMatch(/· cold now, first ping 50m after the next turn/)
@@ -3195,7 +3195,7 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     await $.command.run(run('keepwarm', '6h'))
     await clock.advance(100 * MIN)
     expect(w.forks.length).toBe(1)
-    expect(skipped(w.logs)[0]).toMatch(/costs about \$0\.40, less than 100x the last ping \(\$0\.01\)/)
+    expect(skipped(w.logs)[0]).toMatch(/costs about \$0\.40, less than 100x a ping \(about \$0\.01\)/)
   })
 
   test('a Ping floor of 0 never skips', { options: { pingFloor: 0 } }, async ($, on) => {
@@ -3207,6 +3207,55 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     await clock.advance(150 * MIN)
     expect(w.forks.length).toBe(3)
     expect(skipped(w.logs)).toEqual([])
+  })
+
+  // The receipt priced the context and model of its own moment: a ping now reads today's context at today's prices.
+  test('after a compaction, a ping is priced at the smaller context, not at the old receipt', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live = { tokens: 200000 }
+    const opus = usage({ model: 'claude-opus-5' })
+    const w = world(on, [{ read: 200000, write: 0 }, { read: 15000, write: 0 }], { live, model: 'claude-opus-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: opus }))
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = 15000
+    await $.turn.complete(turn({ usage: opus }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('after a switch to a cheaper model, a ping is priced at the new model, not at the old receipt', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [{ read: 80000, write: 0 }, { read: 80000, write: 0 }], { live: { tokens: 80000 }, model: 'claude-opus-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5' }) }))
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('an unknown context is no cheap rewrite: the ping goes out', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live: { tokens?: number } = { tokens: 20000 }
+    const w = world(on, [dear, dear], { live })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    // A compaction zeroes the context, and a turn that reports no usage leaves it at zero.
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = undefined
+    await $.turn.complete(turn({ usage: undefined }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
   })
 
   test('/keepwarm off while a skip waits for the cold mark: nothing pings, and a later window says it again', async ($, on) => {
