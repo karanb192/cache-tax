@@ -102,8 +102,8 @@ export type State = {
   endingSid: string
 }
 
-/** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage. */
-type StepWrites = { tokens: number; usd: number; priced: boolean }
+/** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage, and the most one of them wrote. */
+type StepWrites = { tokens: number; usd: number; priced: boolean; largest: number }
 
 function priceOf(model: string | null, promptTokens: number): [number, number, number] | null {
   const m = (model ?? '').toLowerCase().replace(/[\s.]+/g, '-')
@@ -887,8 +887,8 @@ export const register: Register = (on, options) => {
     const u = r.usage
     if (!e.agentId && u && !s.compacted) {
       const price = priceOf(u.model || e.model, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
-      const was = s.stepWrites ?? { tokens: 0, usd: 0, priced: true }
-      s.stepWrites = { tokens: was.tokens + u.cache_creation_input_tokens, usd: was.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: was.priced && price != null }
+      const was = s.stepWrites ?? { tokens: 0, usd: 0, priced: true, largest: 0 }
+      s.stepWrites = { tokens: was.tokens + u.cache_creation_input_tokens, usd: was.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: was.priced && price != null, largest: Math.max(was.largest, u.cache_creation_input_tokens) }
     }
     return r
   })
@@ -942,7 +942,10 @@ export const register: Register = (on, options) => {
       // it that reported no usage leave only the turn's total, an upper bound kept for a send the guard saw go cold.
       const writes = s.stepWrites
       const write = !compacted ? written : writes ? writes.tokens : s.steps && s.coldWritePending ? written : 0
-      const full = prev > 20000 && write >= 0.5 * prev
+      // The sum also holds each request's new tool output, so a long warm turn can write half the context in all; when
+      // the steps reported usage, a cold write is one request writing half of it again.
+      const rewrote = writes ? writes.largest : write
+      const full = prev > 20000 && rewrote >= 0.5 * prev
       if (full || (s.coldWritePending && write > 0)) {
         // Priced per request when the steps reported usage; otherwise at the tier of the context the comeback re-sent.
         const price = priceOf(s.lastModel, prev || s.ctx)
