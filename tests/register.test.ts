@@ -1406,6 +1406,20 @@ describe('per-request pricing and window extension', () => {
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid, \$0\.10/)
   })
 
+  test('a long warm turn whose requests together write half the context is no cold write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { steps: Array.from({ length: 30 }, () => usage({ cache_creation_input_tokens: 5000 })) })
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard warn'))
+    await $.turn.complete(turn())
+    await clock.advance(37 * MIN)
+    for (let i = 0; i < 30; i++) await step($, i)
+    // Thirty requests that each read the 200k context and write 5k of new tool output sum to 150k, three quarters of it.
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 30 * 200000, cache_creation_input_tokens: 150000 }) }))
+    expect(w.logs).toEqual([])
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+  })
+
   test('a Haiku 5.5 turn whose requests straddle 100k prices each write at its own tier', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     world(on, [], { steps: [haiku(0, 99000), haiku(99000, 60000)] })

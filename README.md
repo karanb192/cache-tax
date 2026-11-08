@@ -165,14 +165,14 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [228 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [229 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always with its own window and the windows it refuses, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
 - **Managed plugins above the mod:** `/clear`, resume, a restored window and compaction with the classic and compaction events continued beneath the user tier, the same events delivered twice or out of order without a second window, warning or reset, a window and a model change carried through an in-process resume, a transcript that turns old enough to be cold after its resume, a rewind told apart from a compaction, a summary write that is no cold write beside a cold write that is (a guarded send compacted before its first request, two compactions in one turn), an end of the old conversation that overlaps or outlasts the classic resume, and a `/keepwarm` run before the host reports the next conversation's id.
-- **Pricing and display:** a row for every listed model, the Haiku 5.5 long-prompt tier priced per request, Opus 4 and 4.1 apart from Opus 4.5, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
+- **Pricing and display:** a row for every listed model, the Haiku 5.5 long-prompt tier priced per request, a long warm turn whose requests together write half the context kept apart from a cold write, Opus 4 and 4.1 apart from Opus 4.5, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
 - **Indicator:** terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
 - **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
 - **Fork failures:** a busy API is retried while the cache is warm, a retry that wakes too late is dropped, nothing to fork waits for the next turn, one ping is out at a time, a reply that lands after a request, `/clear` or compaction is discarded, and other failures and the null result returned by older releases stop without retrying.
