@@ -31,9 +31,11 @@ const UNATTENDED = new Set(['task-notification', 'scheduled-trigger', 'peer', 'p
 
 const LONG_PROMPT_TOKENS = 100000
 
-// $ per million tokens, [cache read, 1h cache write, output], list prices October 2026.
+// $ per million tokens, [cache read, 1h cache write, output], list prices November 2026.
 // More specific families first: a model id takes the first row it matches.
 const PRICES: Array<[string | RegExp, number, number, number]> = [
+  ['fable-5-2', 0.2, 16, 40],
+  ['mythos-5-2', 0.2, 16, 40],
   ['fable-5-1', 0.25, 20, 50],
   ['mythos-5-1', 0.25, 20, 50],
   ['fable-5', 1, 20, 50],
