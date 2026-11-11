@@ -11,7 +11,10 @@
   "license": "MIT",
   "keywords": [
     "claude-code",
+    "claude-mods",
     "prompt-caching",
+    "prompt-cache",
+    "keepwarm",
     "cache-cost",
     "cost-visibility"
   ],
