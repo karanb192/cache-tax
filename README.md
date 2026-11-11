@@ -32,6 +32,8 @@ In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a s
 
 **Prefer a settings hook?** The [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax) warns by default, refuses once with `CACHE_TAX_BLOCK=1`, and provides a standalone status-line countdown. Warming is part of this mod.
 
+Built by [Karan Bansal](https://karanbansal.in/). Read [the Cache Tax story and recorded cache costs](https://karanbansal.in/blog/cache-tax/).
+
 ## Options
 
 In `/config`, under cache-tax:

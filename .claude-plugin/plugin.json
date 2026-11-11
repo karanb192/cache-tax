@@ -3,9 +3,21 @@
   "version": "2.4.0",
   "description": "A Claude Code mod that keeps the one-hour prompt cache warm during breaks and asks before a cold send, showing its estimated rewrite cost. Warming uses model requests and costs tokens. Requires Claude Code 2.1.287+.",
   "author": {
-    "name": "Karan Bansal"
+    "name": "Karan Bansal",
+    "url": "https://karanbansal.in/"
   },
+  "homepage": "https://cachetax.aidojo.si/",
+  "repository": "https://github.com/karanb192/cache-tax",
   "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-mods",
+    "prompt-caching",
+    "prompt-cache",
+    "keepwarm",
+    "cache-cost",
+    "cost-visibility"
+  ],
   "userConfig": {
     "autoWarm": {
       "type": "string",
