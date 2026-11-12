@@ -1090,6 +1090,13 @@ describe('prices', () => {
     ['anthropic.claude-opus-4-5-20251101-v1:0', '2.00', '0.10', 20],
     ['claude-opus-4-8', '2.00', '0.10', 20],
     ['claude-3-5-haiku-20241022', '0.32', '0.02', 20],
+    ['claude-sonnet-4-6', '1.20', '0.06', 20],
+    ['claude-sonnet-4-5@20250929', '1.20', '0.06', 20],
+    ['claude-haiku-4-5-20251001', '0.40', '0.02', 20],
+    ['claude-opus-5-5[1m]', '1.60', '0.04', 40],
+    ['us.anthropic.claude-opus-5-5', '1.60', '0.04', 40],
+    ['global.anthropic.claude-sonnet-4-6-v1:0', '1.20', '0.06', 20],
+    ['Claude Fable 5.2', '3.20', '0.04', 80],
   ] as const) {
     test(`${model} at 200k tokens is priced from its own row`, async ($, on) => {
       mock.clock(on, { now: START })
@@ -1101,6 +1108,38 @@ describe('prices', () => {
       expect(card.text).toMatch(`break-even  up to ${pings} pings`)
     })
   }
+
+  for (const model of ['claude-fable-5-3', 'claude-opus-5-6', 'claude-opus-4-9', 'claude-sonnet-6', 'claude-sonnet-4-7', 'claude-haiku-6',
+    'claude-haiku-5-5-extra', 'claude-opus-5-5-extra', 'not-claude-opus-5-5', 'claude-3-haiku-20240307', 'anthropic.claude-opus-5-5-v1-extra']) {
+    test(`${model}, a version the table does not list, borrows no other row`, async ($, on) => {
+      mock.clock(on, { now: START })
+      const w = world(on, [], { live: { tokens: 200000 } })
+      await $.session.start(session)
+      await $.turn.complete(turn({ usage: usage({ model }) }))
+      await $.turn.complete(turn({ usage: usage({ model }) }))
+      const card = await $.command.run(run('cache-tax', ''))
+      expect(card.text).toMatch('cold cost   n/a to re-write it (warm turn n/a)')
+      expect(card.text).not.toMatch('break-even')
+      expect(w.logs).toEqual([`cache-tax: no price row for ${model} yet, so dollar figures show n/a. Token counts are unaffected.`])
+    })
+  }
+
+  test('a cold write on a model with no price row is counted and never totalled as $0.00', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { live: { tokens: 200000 } })
+    await $.session.start(session)
+    await $.command.run(run('cache-tax', 'guard warn'))
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-fable-5-3' }) }))
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-fable-5-3', cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid, no price row$/m)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-fable-5-2' }) }))
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-fable-5-2', cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     2 cold writes paid, \$3\.20 and 1 with no price row$/m)
+  })
 
   test('Haiku 5.5 up to 100k tokens takes the short-prompt row', async ($, on) => {
     mock.clock(on, { now: START })

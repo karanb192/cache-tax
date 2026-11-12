@@ -31,33 +31,48 @@ const UNATTENDED = new Set(['task-notification', 'scheduled-trigger', 'peer', 'p
 
 const LONG_PROMPT_TOKENS = 100000
 
+type Price = [number, number, number]
+
 // $ per million tokens, [cache read, 1h cache write, output], list prices November 2026.
-// More specific families first: a model id takes the first row it matches.
-const PRICES: Array<[string | RegExp, number, number, number]> = [
-  ['fable-5-2', 0.2, 16, 40],
-  ['mythos-5-2', 0.2, 16, 40],
-  ['fable-5-1', 0.25, 20, 50],
-  ['mythos-5-1', 0.25, 20, 50],
-  ['fable-5', 1, 20, 50],
-  ['mythos-5', 1, 20, 50],
-  ['opus-5-5', 0.2, 8, 20],
-  ['opus-5', 0.5, 10, 25],
-  // Opus 4 and 4.1 in every spelling (claude-opus-4-1-20250805, claude-opus-4@20250514, the -0 and -1 aliases), never Opus 4.5 and later.
-  [/opus-4(?:-[01])?(?:$|[^-\d]|-20\d{6})/, 1.5, 30, 75],
-  ['opus-4', 0.5, 10, 25],
-  ['sonnet-5-5', 0.1, 4, 10],
-  ['sonnet-5', 0.2, 4, 10],
-  ['sonnet', 0.3, 6, 15],
-  ['haiku-5-5', 0.01, 0.2, 0.5],
-  ['3-5-haiku', 0.08, 1.6, 4],
-  ['haiku-3-5', 0.08, 1.6, 4],
-  ['haiku', 0.1, 2, 5],
-]
+// A model is priced only when its id, less the spellings familyOf() strips, is one of these keys: a version this
+// table does not list gets no price, never the row of an older one.
+const OPUS_4_5: Price = [0.5, 10, 25]
+const OPUS_4: Price = [1.5, 30, 75]
+const SONNET_4: Price = [0.3, 6, 15]
+const HAIKU_3_5: Price = [0.08, 1.6, 4]
+const PRICES: Record<string, Price> = {
+  'fable-5-2': [0.2, 16, 40],
+  'mythos-5-2': [0.2, 16, 40],
+  'fable-5-1': [0.25, 20, 50],
+  'mythos-5-1': [0.25, 20, 50],
+  'fable-5': [1, 20, 50],
+  'mythos-5': [1, 20, 50],
+  'opus-5-5': [0.2, 8, 20],
+  'opus-5': [0.5, 10, 25],
+  'opus-4-8': OPUS_4_5,
+  'opus-4-7': OPUS_4_5,
+  'opus-4-6': OPUS_4_5,
+  'opus-4-5': OPUS_4_5,
+  'opus-4-1': OPUS_4,
+  'opus-4-0': OPUS_4,
+  'opus-4': OPUS_4,
+  'sonnet-5-5': [0.1, 4, 10],
+  'sonnet-5': [0.2, 4, 10],
+  'sonnet-4-6': SONNET_4,
+  'sonnet-4-5': SONNET_4,
+  'sonnet-4-0': SONNET_4,
+  'sonnet-4': SONNET_4,
+  'haiku-5-5': [0.01, 0.2, 0.5],
+  'haiku-4-5': [0.1, 2, 5],
+  '3-5-haiku': HAIKU_3_5,
+  '3-5-haiku-latest': HAIKU_3_5,
+  'haiku-3-5': HAIKU_3_5,
+}
 
 // A request whose prompt, cache reads and writes included, is over 100k tokens pays these instead.
-const LONG_PRICES: Array<[string, number, number, number]> = [
-  ['haiku-5-5', 0.05, 1, 2.5],
-]
+const LONG_PRICES: Record<string, Price> = {
+  'haiku-5-5': [0.05, 1, 2.5],
+}
 
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
@@ -102,20 +117,28 @@ export type State = {
   stepWrites: StepWrites | null
   steps: number
   endingSid: string
+  /** The model already named in the no-price notice, so it is said once per model. */
+  unpricedTold: string
 }
 
 /** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage, and the most one of them wrote. */
 type StepWrites = { tokens: number; usd: number; priced: boolean; largest: number }
 
-function priceOf(model: string | null, promptTokens: number): [number, number, number] | null {
-  const m = (model ?? '').toLowerCase().replace(/[\s.]+/g, '-')
-  if (promptTokens > LONG_PROMPT_TOKENS) {
-    for (const [family, read, write, output] of LONG_PRICES) if (m.includes(family)) return [read, write, output]
-  }
-  for (const [family, read, write, output] of PRICES) {
-    if (typeof family === 'string' ? m.includes(family) : family.test(m)) return [read, write, output]
-  }
-  return null
+/**
+ * The table key for a model id or display name: provider wrappers (anthropic., us.anthropic., -v1:0), the [1m]
+ * context option, the claude- prefix and a snapshot date (-20250805, @20250514) come off; the version stays.
+ */
+function familyOf(model: string | null): string {
+  let m = (model ?? '').trim().toLowerCase().replace(/\[1m\]$/, '')
+  const wrapper = /^(?:(?:us|eu|apac|global)\.)?anthropic\./
+  if (wrapper.test(m)) m = m.replace(wrapper, '').replace(/-v\d+(?::\d+)?$/, '')
+  return m.replace(/[\s.]+/g, '-').replace(/^claude-/, '').replace(/[-@]20\d{6}$/, '')
+}
+
+function priceOf(model: string | null, promptTokens: number): Price | null {
+  const family = familyOf(model)
+  if (promptTokens > LONG_PROMPT_TOKENS && Object.hasOwn(LONG_PRICES, family)) return LONG_PRICES[family]
+  return Object.hasOwn(PRICES, family) ? PRICES[family] : null
 }
 
 export function parseDuration(text: string): number | null {
@@ -144,6 +167,13 @@ function fmtUsd(usd: number | null): string {
 
 function fmtTok(n: number): string {
   return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n)
+}
+
+/** Says once per model that it has no price row, so n/a on screen reads as a missing row and not as zero. */
+function tellUnpriced($: EngineInterface, s: State) {
+  if (!s.lastModel || s.unpricedTold === s.lastModel || priceOf(s.lastModel, s.ctx)) return
+  s.unpricedTold = s.lastModel
+  $.ui.log(`cache-tax: no price row for ${s.lastModel} yet, so dollar figures show n/a. Token counts are unaffected.`)
 }
 
 function coldUsd(s: State): number | null {
@@ -599,8 +629,11 @@ function card(s: State, now: number): string {
   lines.push(`guard       ${s.guard === 'warn' ? 'warn only (/cache-tax guard refuse to be asked first)'
     : s.guard ? `ask first at ${fmtUsd(s.guard)} or more, warn below (/cache-tax guard refuse to ask at any price)`
     : 'ask first (/cache-tax guard warn to only show the price)'}`)
-  const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
-  lines.push(`session     ${s.misses.length} cold write${s.misses.length === 1 ? '' : 's'} paid, ${fmtUsd(paid)}`)
+  const priced = s.misses.filter(m => m.usd != null)
+  const unpriced = s.misses.length - priced.length
+  const paid = priced.reduce((a, m) => a + (m.usd ?? 0), 0)
+  const total = !unpriced ? fmtUsd(paid) : priced.length ? `${fmtUsd(paid)} and ${unpriced} with no price row` : 'no price row'
+  lines.push(`session     ${s.misses.length} cold write${s.misses.length === 1 ? '' : 's'} paid, ${total}`)
   return lines.join('\n')
 }
 
@@ -608,7 +641,7 @@ export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', testOnce: false,
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false,
   }
 }
 
@@ -809,6 +842,7 @@ export const register: Register = (on, options) => {
       s.testOnce = false
       const model = await $.session.model()
       if (model) s.lastModel = model
+      tellUnpriced($, s)
       const sid = s.sid
       const send = sendLabel(s)
       const answer = await ask($, `cache-tax test, as if the cache were cold: ${costText(s)} ${saveText(s, now)} Send it anyway?`, send)
@@ -832,6 +866,7 @@ export const register: Register = (on, options) => {
     // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
     const model = await $.session.model()
     if (model) s.lastModel = model
+    tellUnpriced($, s)
     // A refused prompt that no person sent would be lost: nobody is there to send it again.
     const unattended = UNATTENDED.has(e.origin.kind)
     // A model with no price row has no estimate to compare, so the floor never lets it through.
@@ -932,6 +967,7 @@ export const register: Register = (on, options) => {
     const u = e.usage
     if (u) {
       if (u.model) s.lastModel = u.model
+      tellUnpriced($, s)
       const prev = s.ctx
       // A turn's usage is its responses summed, so a ten-step turn reports ten
       // reads of the context. The live window is the engine's figure; the sum
