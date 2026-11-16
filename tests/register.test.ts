@@ -568,7 +568,7 @@ describe('guard', () => {
     await clock.advance(3 * HOUR)
     expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
     for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5', 'refuse 5 0']) {
-      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes warn, refuse, refuse with a dollar floor such as refuse 5, or test/)
+      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes default, warn, refuse, refuse with a dollar floor such as refuse 5, or test/)
     }
     expect(store.get('guard')).toBe(5)
     await $.command.run(run('cache-tax', 'guard refuse'))
@@ -1225,6 +1225,40 @@ describe('always after /clear', () => {
 })
 
 describe('guard by origin', () => {
+  test('the send opt-in waits until stored guard preferences are loaded', { options: { headless: 'send' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let release = () => {}
+    let opened = () => {}
+    const waiting = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [], { store: new Map([['guard', 'refuse']]), storeGate: async (op, key) => {
+      if (op === 'get' && key === 'guard') await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    const starting = $.session.start({ ...session, isInteractive: false })
+    await waiting
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const result = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+    release()
+    await starting
+    expect(result.drop).toMatch(/^cache-tax:/)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const initial of ['refuse', 5]) {
+    test(`guard default clears ${initial} and restores the headless option`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>([['guard', initial]])
+      const w = world(on, [], { store })
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      await $.command.run(run('cache-tax', 'guard default'))
+      expect(store.has('guard')).toBe(false)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
   for (const interactive of [false, true]) {
     test(`an SDK host can answer the guard dialog (interactive ${interactive})`, { options: { headless: 'guard' } }, async ($, on) => {
       const clock = mock.clock(on, { now: START })
@@ -1260,7 +1294,7 @@ describe('guard by origin', () => {
       if (!persisted) await $.command.run(run('cache-tax', 'guard refuse'))
       await $.turn.complete(turn())
       await clock.advance(3 * HOUR)
-      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/^cache-tax:/)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/Headless prompts: send is overridden by guard refuse/)
       expect(w.entered).toEqual([])
     })
   }

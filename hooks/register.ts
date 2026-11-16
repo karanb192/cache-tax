@@ -650,6 +650,7 @@ export const register: Register = (on, options) => {
   const s = freshState()
   let headless = false
   let explicitRefuse = false
+  let guardLoaded = false
   const sendHeadless = options.headless === 'send'
   let light = false
   let noColor = false
@@ -696,6 +697,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
+    guardLoaded = false
     const r = await next(e)
     headless = !e.isInteractive
     s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
@@ -715,6 +717,7 @@ export const register: Register = (on, options) => {
     // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
     s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
     explicitRefuse = savedGuard === 'refuse'
+    guardLoaded = true
     const stored = alwaysWindow(await $.store.get(KEY_ALWAYS))
     s.always = stored > 0
     if (stored) s.alwaysMs = stored
@@ -730,8 +733,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'cache-tax',
-      description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse|test (cache-tax, the Mod)',
-      argumentHint: '[status | guard warn | guard refuse [dollars] | guard test]',
+      description: 'Prompt cache state, cold price and this session\'s cold writes; guard default|warn|refuse|test (cache-tax, the Mod)',
+      argumentHint: '[status | guard default | guard warn | guard refuse [dollars] | guard test]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -820,13 +823,19 @@ export const register: Register = (on, options) => {
     const words = String(e.args ?? '').trim().split(/\s+/).filter(Boolean)
     const now = await $.clock.now()
     if (words[0] === 'guard') {
+      if (words[1] === 'default' && !words[2]) {
+        s.guard = 0
+        explicitRefuse = false
+        await $.store.delete(KEY_GUARD)
+        return { text: 'guard reset to default: ask before cold sends; Headless prompts controls non-interactive SDK sends' }
+      }
       if (words[1] === 'test' && !words[2]) {
         s.testOnce = true
         return { text: 'the next prompt you send asks as if the cache were cold, priced at this session\'s context; the test scores nothing, though a send into a cache that really is cold is scored as usual' }
       }
       const floor = words[1] === 'refuse' && words[2] ? Number(words[2].replace(/^\$/, '')) : 0
       const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
-      if (!valid) return { text: '/cache-tax guard takes warn, refuse, refuse with a dollar floor such as refuse 5, or test' }
+      if (!valid) return { text: '/cache-tax guard takes default, warn, refuse, refuse with a dollar floor such as refuse 5, or test' }
       s.guard = words[1] === 'warn' ? 'warn' : floor
       explicitRefuse = words[1] === 'refuse' && floor === 0
       await $.store.set(KEY_GUARD, s.guard || 'refuse')
@@ -877,7 +886,7 @@ export const register: Register = (on, options) => {
     // A model with no price row has no estimate to compare, so the floor never lets it through.
     const usd = coldUsd(s)
     const guard = s.guard
-    const optedIn = headless && sendHeadless && !explicitRefuse && e.origin.kind === 'sdk' && guard === 0
+    const optedIn = guardLoaded && headless && sendHeadless && !explicitRefuse && e.origin.kind === 'sdk' && guard === 0
     const under = guard !== 'warn' && usd != null && usd < guard
     if (guard === 'warn' || unattended || under || optedIn) {
       const why = optedIn ? ', since Headless prompts is set to send' : unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
@@ -908,7 +917,8 @@ export const register: Register = (on, options) => {
     // No dialog to answer (dismissed, or a run with no one to ask): refuse once, the resend pays.
     s.ackedAt = s.lastRequestAt
     if (s.lastResponseAt) await $.store.set(ackedKey(s), s.lastResponseAt)
-    const reason = `cache-tax: ${guardText(s, now)} Send it again to pay it, and ${holdNote(s, now, true)}. Or /clear and start from a note.`
+    const override = headless && sendHeadless && explicitRefuse && e.origin.kind === 'sdk' ? ' Headless prompts: send is overridden by guard refuse. Use /cache-tax guard default to restore the default.' : ''
+    const reason = `cache-tax: ${guardText(s, now)} Send it again to pay it, and ${holdNote(s, now, true)}. Or /clear and start from a note.${override}`
     if (headless) $.ui.log(reason)
     return { drop: reason }
   })

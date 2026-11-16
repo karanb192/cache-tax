@@ -49,7 +49,7 @@ In `/config`, under cache-tax:
 
 **When you return cold:** for a context of at least 50,000 tokens, the guard asks before your ordinary message goes out when its one-hour clock says cold. The question shows the estimated rewrite cost and warming guidance. **Send anyway** sends that message; **Don't send** drops it. If the dialog is dismissed or the host cannot answer it, the guard refuses once and the resend goes through. SDK hosts that can answer the dialog retain that choice. `/cache-tax guard refuse 5` asks at $5 or more, including a model with no price row; cheaper sends log their price and proceed.
 
-`Headless prompts: send` opts non-interactive `sdk`-origin prompts into sending immediately at the default guard setting. Claude Code uses those same fields for both `claude -p` and Agent SDK turns, so the option covers both; it cannot distinguish the CLI from an SDK host. The default, `guard`, preserves the guard. Explicit `/cache-tax guard refuse`, with or without a dollar floor, still applies with `send`. Remote human messages (`composer`, `bridge`, `unclassified` and channel origins) keep the guard, even in a non-interactive host. Background notifications and scheduled prompts retain their existing send-through behavior because they cannot be resent by a person.
+`Headless prompts: send` opts non-interactive `sdk`-origin prompts into sending immediately at the default guard setting. Claude Code uses those same fields for both `claude -p` and Agent SDK turns, so the option covers both; it cannot distinguish the CLI from an SDK host. The default, `guard`, keeps asking, or refuses once where nobody can answer. Explicit `/cache-tax guard refuse`, with or without a dollar floor, still applies with `send`; `/cache-tax guard default` clears that explicit preference. Remote human messages (`composer`, `bridge`, `unclassified` and channel origins) keep the guard, even in a non-interactive host. Background notifications and scheduled prompts are sent with the price logged because no person can resend them.
 
 A headless refusal returns its reason and logs it to the transcript/debug log. Use Claude Code's `--debug-file` when diagnosing a script. The mod API cannot set the process exit code or write a refusal to stderr; a refusal need not produce a nonzero exit or a reason on stdout. An opted-in run that hits a dollar floor must still be retried deliberately.
 
@@ -82,7 +82,9 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
     /keepwarm off           stop, forget the window, and turn always off
     /cache-tax              the card
     /cache-tax guard warn   show the price and send (the hook's default)
-    /cache-tax guard refuse ask before a cold send: Send anyway or Don't send (this mod's default)
+    /cache-tax guard default
+                            restore the default guard and let Headless prompts control non-interactive SDK sends
+    /cache-tax guard refuse ask before a cold send, overriding Headless prompts: send
     /cache-tax guard refuse 5
                             ask only at $5 or more; below that, show the price and send
     /cache-tax guard test   ask once on the next prompt you send as if the cache were cold, priced at this session's context; the test scores nothing, a send into a really cold cache is scored as usual
@@ -174,9 +176,10 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [266 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [269 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
+- **Headless prompts option:** opt-in for non-interactive SDK prompts, SDK dialog answers, interactive SDK and remote human guards, explicit refusal and dollar floors, resetting to default, and a prompt arriving while stored preferences are still loading.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always with its own window and the windows it refuses, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
