@@ -26,6 +26,9 @@ const KEY_ALWAYS = 'always'
 const KEEP_LABEL = "Don't send"
 const MOVED_TEXT = 'cache-tax: the conversation changed while the question was open, so this was not sent. Send it again.'
 const SEND_LABEL = 'Send anyway'
+const COMPACT_LABEL = 'Compact, then send'
+const COMPACTING_TEXT = 'cache-tax: compacting first. Your message is sent when the summary is ready.'
+const COMPACT_BUSY_TEXT = 'cache-tax: still compacting, so this was not sent. Send it again when the summary is ready.'
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
 // other origin, including sdk, unclassified and the owner's own Slack or channel
@@ -121,6 +124,8 @@ export type State = {
   stopped: string | null
   /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
   testOnce: boolean
+  /** Nonzero while a compaction the person picked in the guard's question runs; the number says whose it is, so a /clear in the middle orphans it. */
+  compacting: number
   waitForTurn: boolean
   retries: number
   retryReason: string
@@ -241,15 +246,68 @@ function saveText(s: State, now: number): string {
     `at about ${fmtUsd(warm)} a ping, so the next break does not cost ${fmtUsd(cold)} again.`
 }
 
+/** The line after a compaction the guard ran: the sizes the engine recorded and what the summary request cost, where it reported them. */
+function compactedText(s: State, done: { tokensBefore?: number; tokensAfter?: number; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } }): string {
+  const sizes = done.tokensBefore != null && done.tokensAfter != null ? ` (${done.tokensBefore.toLocaleString('en-US')} to ${done.tokensAfter.toLocaleString('en-US')} tokens)` : ''
+  const price = done.usage ? priceOf(s.lastModel, done.usage.input_tokens + done.usage.cache_read_input_tokens + done.usage.cache_creation_input_tokens) : null
+  const cost = done.usage && price ? ` The summary request cost ${fmtUsd(pingUsd(done.usage, price))}.` : ''
+  return `compacted before sending${sizes}.${cost}`
+}
+
+let compactions = 0
+
+/** Puts a prompt that was held and not sent back in the prompt box; says so only where a box took it. */
+async function giveBack($: EngineInterface, text: string): Promise<string> {
+  try {
+    return (await $.prompt.fill({ text })).isFilled ? ' and is back in the prompt box' : ''
+  } catch {
+    return ''
+  }
+}
+
+/** Runs the compaction the person picked, outside the hook that asked, then sends the held prompt. Nothing is sent after a /clear, a resume, a skip or a failure. */
+async function compactThenSend($: EngineInterface, s: State, sid: string, mine: number, text: string) {
+  let done: Awaited<ReturnType<EngineInterface['session']['compact']>> | null = null
+  try {
+    // The same call /compact makes. It rejects while a turn runs and on an engine without it.
+    done = await $.session.compact()
+  } catch { /* told below */ }
+  // The summary is a model request and can take a minute; a /clear or a resume in the middle moved the conversation.
+  if (s.compacting !== mine || s.sid !== sid) return
+  if (!done || done.skip !== undefined) {
+    s.compacting = 0
+    const back = await giveBack($, text)
+    $.ui.log(done ? `the compaction was skipped (${done.skip}), so your message was not sent${back}.` : `the compaction did not run, so your message was not sent${back}. Run /compact yourself, then send it.`)
+    return
+  }
+  // Reset as the session.compact hook resets it, in case the engine did not run that hook for the mod's own call:
+  // what follows is the summary, no cold write, and nothing is scored.
+  markCompacted(s)
+  s.ctx = 0
+  disarm(s)
+  await arm($, s)
+  if (s.compacting !== mine || s.sid !== sid) return
+  s.compacting = 0
+  $.ui.log(compactedText(s, done))
+  try {
+    await $.prompt.submit({ text, asUser: true })
+  } catch {
+    $.ui.log(`compacted, but your message could not be sent${await giveBack($, text)}. Send it again.`)
+  }
+}
+
 function sendLabel(s: State): string {
   const cold = coldUsd(s)
   return cold == null ? SEND_LABEL : `${SEND_LABEL} (${fmtUsd(cold)})`
 }
 
+/** What the middle answer does. The summary request is not free on a cold cache, so the question says so. */
+const COMPACT_TEXT = `${COMPACT_LABEL} summarizes the conversation first, as /compact does: the summary request still reads this context cold, and the turns after it run on the summary.`
+
 /** Asks in the engine's own dialog, Send anyway first; null when it is dismissed or no one can be asked. */
-async function ask($: EngineInterface, question: string, send: string): Promise<string | null> {
+async function ask($: EngineInterface, question: string, send: string, compact = false): Promise<string | null> {
   try {
-    return await $.ui.ask(question, { header: 'Cache Tax', options: [send, KEEP_LABEL] })
+    return await $.ui.ask(question, { header: 'Cache Tax', options: compact ? [send, COMPACT_LABEL, KEEP_LABEL] : [send, KEEP_LABEL] })
   } catch {
     return null
   }
@@ -279,6 +337,7 @@ export function resetForClear(s: State) {
   s.stepWrites = null
   s.steps = 0
   s.testOnce = false
+  s.compacting = 0
   // The last receipt priced the old conversation's context; the next one's first ping makes its own.
   s.last = null
   s.warmReceipts = []
@@ -728,7 +787,7 @@ export function freshState(): State {
   return {
     display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, warmReceipts: [], idleSpentUsd: 0, idleGen: 0, skipping: false, skipSaid: false, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false,
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false, compacting: 0,
   }
 }
 
@@ -968,6 +1027,8 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
+    // A second prompt typed while the first one's compaction runs would be asked about the context being replaced.
+    if (s.compacting && !UNATTENDED.has(e.origin.kind)) return { drop: COMPACT_BUSY_TEXT }
     // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
     const model = await $.session.model()
     if (model) s.lastModel = model
@@ -995,10 +1056,22 @@ export const register: Register = (on, options) => {
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
     const sid = s.sid
     const send = sendLabel(s)
-    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
+    // A plugin's prompt carries no pasted images, so a prompt with attachments is not offered the compaction.
+    const canCompact = !e.attachments?.length
+    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)}${canCompact ? ` ${COMPACT_TEXT}` : ''} Send it anyway?`, send, canCompact)
     // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
     // answer belongs to the old one: nothing is sent, scored or stored under the new id.
     if (s.sid !== sid) return { drop: MOVED_TEXT }
+    if (answer === COMPACT_LABEL) {
+      // The engine refuses a compaction under the turn this hook is holding, so the prompt is dropped here and sent
+      // again, as the person's own words, once the summary is in. Its text lives in this closure until then and
+      // nowhere else: never stored, never logged.
+      const text = e.text
+      const mine = ++compactions
+      s.compacting = mine
+      $.clock.after(0, () => { void compactThenSend($, s, sid, mine, text) })
+      return { drop: COMPACTING_TEXT }
+    }
     if (answer === send) {
       s.coldWritePending = true
       return next(e)
