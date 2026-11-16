@@ -137,8 +137,8 @@ function familyOf(model: string | null): string {
 
 function priceOf(model: string | null, promptTokens: number): Price | null {
   const family = familyOf(model)
-  if (promptTokens > LONG_PROMPT_TOKENS && Object.hasOwn(LONG_PRICES, family)) return LONG_PRICES[family]
-  return Object.hasOwn(PRICES, family) ? PRICES[family] : null
+  if (promptTokens > LONG_PROMPT_TOKENS && Object.hasOwn(LONG_PRICES, family)) return LONG_PRICES[family] ?? null
+  return Object.hasOwn(PRICES, family) ? (PRICES[family] ?? null) : null
 }
 
 export function parseDuration(text: string): number | null {
@@ -776,7 +776,7 @@ export const register: Register = (on, options) => {
     }
     if (words[0] === 'always') {
       // One optional window and nothing after it: a dropped trailing word would arm something other than what was typed.
-      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]) : null
+      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]!) : null
       if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
       s.always = true
       s.alwaysMs = windowMs
@@ -793,7 +793,7 @@ export const register: Register = (on, options) => {
       return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
     }
     if (words[0] !== 'status') {
-      const window = parseDuration(words[0])
+      const window = parseDuration(words[0]!)
       if (!window) return { text: 'keepwarm takes a window such as 6h or 90m, or always, off, or status' }
       // "every 2m" is a testing knob and lasts only for the window it was given with.
       let every = PING_AFTER_MS
