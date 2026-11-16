@@ -27,8 +27,10 @@ const KEEP_LABEL = "Don't send"
 const MOVED_TEXT = 'cache-tax: the conversation changed while the question was open, so this was not sent. Send it again.'
 const SEND_LABEL = 'Send anyway'
 const COMPACT_LABEL = 'Compact, then send'
+const CLEAR_LABEL = 'Clear, then send'
 const COMPACTING_TEXT = 'cache-tax: compacting first. Your message is sent when the summary is ready.'
-const COMPACT_BUSY_TEXT = 'cache-tax: still compacting, so this was not sent. Send it again when the summary is ready.'
+const CLEARING_TEXT = 'cache-tax: clearing first. Your message is sent into the new conversation.'
+const HOLD_BUSY_TEXT = 'cache-tax: still compacting or clearing for your earlier message, so this was not sent. Send it again when that is done.'
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
 // other origin, including sdk, unclassified and the owner's own Slack or channel
@@ -126,6 +128,8 @@ export type State = {
   testOnce: boolean
   /** Nonzero while a compaction the person picked in the guard's question runs; the number says whose it is, so a /clear in the middle orphans it. */
   compacting: number
+  /** Nonzero while a /clear the person picked in the guard's question runs. Unlike `compacting`, the clear's own reset leaves it alone. */
+  clearing: number
   waitForTurn: boolean
   retries: number
   retryReason: string
@@ -254,7 +258,7 @@ function compactedText(s: State, done: { tokensBefore?: number; tokensAfter?: nu
   return `compacted before sending${sizes}.${cost}`
 }
 
-let compactions = 0
+let heldPrompts = 0
 
 /** Puts a prompt that was held and not sent back in the prompt box; says so only where a box took it. */
 async function giveBack($: EngineInterface, text: string): Promise<string> {
@@ -296,6 +300,30 @@ async function compactThenSend($: EngineInterface, s: State, sid: string, mine: 
   }
 }
 
+/** Runs the /clear the person picked, outside the hook that asked, then sends the held prompt into the new conversation. */
+async function clearThenSend($: EngineInterface, s: State, mine: number, text: string) {
+  let ran = true
+  try {
+    // The same call as typing /clear. It rejects inside a hook a turn waits on, which is why this runs from a timer.
+    await $.command.run({ command: 'clear' })
+  } catch {
+    ran = false
+  }
+  if (s.clearing !== mine) return
+  s.clearing = 0
+  // /clear resets this state through the session's end or its restart. A context still counted here means it never ran.
+  if (!ran || s.ctx >= BIG_TOKENS) {
+    $.ui.log(`the clear did not run, so your message was not sent${await giveBack($, text)}. Run /clear yourself, then send it.`)
+    return
+  }
+  $.ui.log('cleared before sending: this is a new conversation, so nothing was rewritten.')
+  try {
+    await $.prompt.submit({ text, asUser: true })
+  } catch {
+    $.ui.log(`cleared, but your message could not be sent${await giveBack($, text)}. Send it again.`)
+  }
+}
+
 function sendLabel(s: State): string {
   const cold = coldUsd(s)
   return cold == null ? SEND_LABEL : `${SEND_LABEL} (${fmtUsd(cold)})`
@@ -303,11 +331,12 @@ function sendLabel(s: State): string {
 
 /** What the middle answer does. The summary request is not free on a cold cache, so the question says so. */
 const COMPACT_TEXT = `${COMPACT_LABEL} summarizes the conversation first, as /compact does: the summary request still reads this context cold, and the turns after it run on the summary.`
+const CLEAR_TEXT = `${CLEAR_LABEL} starts a new conversation with /clear and sends your message there: nothing is rewritten, and nothing from before is remembered.`
 
 /** Asks in the engine's own dialog, Send anyway first; null when it is dismissed or no one can be asked. */
-async function ask($: EngineInterface, question: string, send: string, compact = false): Promise<string | null> {
+async function ask($: EngineInterface, question: string, send: string, extra: readonly string[] = []): Promise<string | null> {
   try {
-    return await $.ui.ask(question, { header: 'Cache Tax', options: compact ? [send, COMPACT_LABEL, KEEP_LABEL] : [send, KEEP_LABEL] })
+    return await $.ui.ask(question, { header: 'Cache Tax', options: [send, ...extra, KEEP_LABEL] })
   } catch {
     return null
   }
@@ -787,7 +816,7 @@ export function freshState(): State {
   return {
     display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, warmReceipts: [], idleSpentUsd: 0, idleGen: 0, skipping: false, skipSaid: false, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false, compacting: 0,
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false, compacting: 0, clearing: 0,
   }
 }
 
@@ -1028,7 +1057,7 @@ export const register: Register = (on, options) => {
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
     // A second prompt typed while the first one's compaction runs would be asked about the context being replaced.
-    if (s.compacting && !UNATTENDED.has(e.origin.kind)) return { drop: COMPACT_BUSY_TEXT }
+    if ((s.compacting || s.clearing) && !UNATTENDED.has(e.origin.kind)) return { drop: HOLD_BUSY_TEXT }
     // The last turn's model is stale after /model, and the dollar floor decides on this price, so it is read again.
     const model = await $.session.model()
     if (model) s.lastModel = model
@@ -1056,18 +1085,26 @@ export const register: Register = (on, options) => {
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
     const sid = s.sid
     const send = sendLabel(s)
-    // A plugin's prompt carries no pasted images, so a prompt with attachments is not offered the compaction.
-    const canCompact = !e.attachments?.length
-    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)}${canCompact ? ` ${COMPACT_TEXT}` : ''} Send it anyway?`, send, canCompact)
+    // A plugin's prompt carries no pasted images, so a prompt with attachments is not offered the two answers that resend it.
+    const canHold = !e.attachments?.length
+    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)}${canHold ? ` ${COMPACT_TEXT} ${CLEAR_TEXT}` : ''} Send it anyway?`, send, canHold ? [COMPACT_LABEL, CLEAR_LABEL] : [])
     // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
     // answer belongs to the old one: nothing is sent, scored or stored under the new id.
     if (s.sid !== sid) return { drop: MOVED_TEXT }
+    if (answer === CLEAR_LABEL) {
+      // Held in this closure until the clear ends, then sent unchanged; never stored, never logged.
+      const text = e.text
+      const mine = ++heldPrompts
+      s.clearing = mine
+      $.clock.after(0, () => { void clearThenSend($, s, mine, text) })
+      return { drop: CLEARING_TEXT }
+    }
     if (answer === COMPACT_LABEL) {
       // The engine refuses a compaction under the turn this hook is holding, so the prompt is dropped here and sent
       // again, as the person's own words, once the summary is in. Its text lives in this closure until then and
       // nowhere else: never stored, never logged.
       const text = e.text
-      const mine = ++compactions
+      const mine = ++heldPrompts
       s.compacting = mine
       $.clock.after(0, () => { void compactThenSend($, s, sid, mine, text) })
       return { drop: COMPACTING_TEXT }

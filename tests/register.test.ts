@@ -2836,8 +2836,8 @@ describe('ask before a cold send', () => {
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
-    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Compact, then send summarizes the conversation first, as /compact does: the summary request still reads this context cold, and the turns after it run on the summary. Send it anyway?`)
-    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', 'Compact, then send', "Don't send"])
+    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Compact, then send summarizes the conversation first, as /compact does: the summary request still reads this context cold, and the turns after it run on the summary. Clear, then send starts a new conversation with /clear and sends your message there: nothing is rewritten, and nothing from before is remembered. Send it anyway?`)
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', 'Compact, then send', 'Clear, then send', "Don't send"])
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
   })
@@ -2982,14 +2982,99 @@ describe('ask before a cold send', () => {
     await $.prompt.submit(prompt('first'))
     const tick = clock.advance(1)
     await running
-    expect((await $.prompt.submit(prompt('second'))).drop).toBe('cache-tax: still compacting, so this was not sent. Send it again when the summary is ready.')
+    expect((await $.prompt.submit(prompt('second'))).drop).toBe('cache-tax: still compacting or clearing for your earlier message, so this was not sent. Send it again when that is done.')
     expect(asked.length).toBe(1)
     finish()
     await tick
     expect(w.entered).toEqual(['first'])
   })
 
-  test('a prompt with a pasted image is not offered the compaction', async ($, on) => {
+  test('Clear, then send runs /clear, then sends the same prompt as the person\'s own into the new conversation', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const order: string[] = []
+    const w: ReturnType<typeof world> = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, async () => {
+      order.push(`clear, entered ${w.entered.length}`)
+      await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+      return { text: '' }
+    })
+    const asked = answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    // A command cannot run under a held prompt, so the hook lets go of it first.
+    expect(r.drop).toBe('cache-tax: clearing first. Your message is sent into the new conversation.')
+    expect(w.entered).toEqual([])
+    await clock.advance(1)
+    expect(order).toEqual(['clear, entered 0'])
+    expect(w.entered).toEqual(['hi'])
+    expect(w.origins.at(-1)).toMatchObject({ kind: 'plugin', asUser: true })
+    expect(w.logs.at(-1)).toBe('cleared before sending: this is a new conversation, so nothing was rewritten.')
+    expect(asked.length).toBe(1)
+    // Nothing was written cold, so nothing is scored, and the next message is not asked about.
+    expect((await $.command.run(run('cache-tax', 'status'))).text).toMatch(/session     0 cold writes paid/)
+    await $.prompt.submit(prompt('next'))
+    expect(w.entered).toEqual(['hi', 'next'])
+    expect(asked.length).toBe(1)
+  })
+
+  test('Clear, then send gives the prompt back unsent when the clear never took effect', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { commands: ['clear'] })
+    // The command answers but the conversation is still there: no session end reached the mod.
+    on('command.run', { command: 'clear' }, () => ({ text: '' }))
+    answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+    expect(w.logs.at(-1)).toBe('the clear did not run, so your message was not sent and is back in the prompt box. Run /clear yourself, then send it.')
+  })
+
+  test('Clear, then send gives the prompt back unsent when the command is refused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, () => { throw new Error('busy') })
+    answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+  })
+
+  test('a second prompt typed while the clear runs is dropped, not asked about', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let finish = () => {}
+    let started = () => {}
+    const running = new Promise<void>(r => { started = r })
+    const w = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, async () => {
+      await new Promise<void>(r => { finish = r; started() })
+      await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+      return { text: '' }
+    })
+    const asked = answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('first'))
+    const tick = clock.advance(1)
+    await running
+    expect((await $.prompt.submit(prompt('second'))).drop).toBe('cache-tax: still compacting or clearing for your earlier message, so this was not sent. Send it again when that is done.')
+    expect(asked.length).toBe(1)
+    finish()
+    await tick
+    expect(w.entered).toEqual(['first'])
+  })
+
+  test('a prompt with a pasted image is not offered the compaction or the clear', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     world(on, [])
     const asked = answering(on, "Don't send")
@@ -3042,8 +3127,8 @@ describe('ask before a cold send', () => {
     const refused = await $.prompt.submit(prompt('hi'))
     expect(refused.drop).toMatch(/keepwarm will be armed for up to 3h00m\./)
     expect(refused.drop).not.toMatch(/idle spending limit/)
-    expect(asked[0]!.options).toEqual(['Send anyway', 'Compact, then send', "Don't send"])
-    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Compact, then send summarizes .* Send it anyway\?$/)
+    expect(asked[0]!.options).toEqual(['Send anyway', 'Compact, then send', 'Clear, then send', "Don't send"])
+    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Compact, then send summarizes .* Clear, then send starts .* Send it anyway\?$/)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
     await $.turn.complete(turn({ usage: usage({ model: 'some-future-model', cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
@@ -3291,7 +3376,7 @@ describe('the Auto keepwarm option', () => {
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
-    expect(asked[0]!.question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Compact, then send summarizes .* Send it anyway\?$/)
+    expect(asked[0]!.question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Compact, then send summarizes .* Clear, then send starts .* Send it anyway\?$/)
   })
 
   test('off: a window armed by hand is promised until its deadline, and keeps pinging after a paid cold write', off, async ($, on) => {
