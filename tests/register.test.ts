@@ -3176,8 +3176,8 @@ describe('$.cacheTax noun', () => {
 })
 
 describe('display option', () => {
-  const armed = async ($: Engine) => {
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+  const armed = async ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') => {
+    await $.session.start({ ...session, surface, isInteractive: true })
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '90m'))
   }
@@ -3190,13 +3190,14 @@ describe('display option', () => {
     expect(await ui.find({ type: 'Image' })).toBeTruthy()
   })
 
-  test('status moves the state to the status entry and draws no row', { options: { display: 'status' } }, async ($, on) => {
+  for (const surface of ['terminal', 'desktop'] as const) test(`status moves the state to the ${surface} status entry and draws no row`, { options: { display: 'status' } }, async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
-    await armed($)
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    await armed($, surface)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
     expect(await ui.find({ type: 'Image' })).toBe(undefined)
-    expect(w.status.some(text => typeof text === 'string' && text.startsWith('keepwarm '))).toBe(true)
+    expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+    expect(w.status.at(-1)).toBe('cache-tax · warm · keepwarm 1h30m left · ping in 50m')
   })
 
   test('off is not a choice: it falls back to the band, so running pings always show', { options: { display: 'off' } }, async ($, on) => {

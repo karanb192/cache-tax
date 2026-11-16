@@ -340,9 +340,16 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
   }
 }
 
+function cacheState(s: State, now: number) {
+  return s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+}
+
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
-  else $.ui.status(statusText(s, now))
+  else {
+    const text = statusText(s, now)
+    $.ui.status(text && s.display === 'status' ? `cache-tax · ${cacheState(s, now)} · ${text}` : text)
+  }
   if (s.deadline > now && !s.statusRefresh) {
     // Repaint the countdown independently of the model-request and retry timers.
     const refresh = $.clock.every(STATUS_REFRESH_MS, () => {
@@ -678,7 +685,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
-    const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+    const state = cacheState(s, now)
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
