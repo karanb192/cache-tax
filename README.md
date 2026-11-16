@@ -32,6 +32,8 @@ In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a s
 
 **Prefer a settings hook?** The [hook version](https://github.com/karanb192/claude-code-hooks/tree/main/plugins/cache-tax) warns by default, refuses once with `CACHE_TAX_BLOCK=1`, and provides a standalone status-line countdown. Warming is part of this mod.
 
+Built by [Karan Bansal](https://karanbansal.in/). Read [the Cache Tax story and recorded cache costs](https://karanbansal.in/blog/cache-tax/).
+
 ## Options
 
 In `/config`, under cache-tax:
@@ -114,6 +116,8 @@ Validated on Claude Code 2.1.312:
 
 Reach L2, drives Claude. Sees every prompt you type, every model request's timing and every answer's token counts.
 
+The same scan is on [cache-tax's page in Awesome Claude Code Mods](https://mods.aidojo.si/mods/karanb192--cache-tax--cache-tax/), which records what thousands of other mods can reach.
+
     Threat model for cache-tax (reach L2, drives Claude)
     1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list; the session id, the session's model and the engine's own context figure and start time, once per conversation the process runs, and the model again before pricing a cold send; the reason and session id of a conversation ending under /clear or an in-process resume; each main request's message count; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch (and its window) and guard mode with its dollar floor; at load, its Auto keepwarm option
     2. Runs:     one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read; one question in Claude Code's own dialog before a cold send goes out, or on the next prompt after /cache-tax guard test
@@ -123,7 +127,7 @@ Reach L2, drives Claude. Sees every prompt you type, every model request's timin
 
 ## Cost and the plan-limit question
 
-Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at $20 and answers at $50 per million tokens; Sonnet 5 has its own row ($0.20, $4, $10). On an API key the arithmetic is plain. A ping bills the cache read, its own few uncached tokens at the base rate, and whatever the model says back at the output rate; the displayed ping cost counts all of it, since a fork takes no output cap and a model at high effort may think before it says "warm". A comeback after the lapse is a write. The card prints the read-only upper bound for your model, 80 pings on Fable 5.1, with the idle that covers at the current ping period; a real ping costs a little more than a read, so the true break-even sits below that number. On a subscription the dollars are a yardstick, not the bill, and how a cache read weighs against the 5-hour and weekly limits is not documented anywhere I could find. Watch the rate-limit row of your status line during the first window.
+Prices are the list table, where Fable 5.1 reads at $0.25, writes the 1h tier at $20 and answers at $50 per million tokens; Fable 5.2 ($0.20, $16, $40) and Sonnet 5 ($0.20, $4, $10) have their own rows. Only listed versions are priced: a model newer than the table shows `n/a` for dollars and one line saying it has no price row yet, and it never takes an older model's rate. On an API key the arithmetic is plain. A ping bills the cache read, its own few uncached tokens at the base rate, and whatever the model says back at the output rate; the displayed ping cost counts all of it, since a fork takes no output cap and a model at high effort may think before it says "warm". A comeback after the lapse is a write. The card prints the read-only upper bound for your model, 80 pings on Fable 5.1, with the idle that covers at the current ping period; a real ping costs a little more than a read, so the true break-even sits below that number. On a subscription the dollars are a yardstick, not the bill, and how a cache read weighs against the 5-hour and weekly limits is not documented anywhere I could find. Watch the rate-limit row of your status line during the first window.
 
 ## Limits
 
@@ -165,14 +169,14 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [228 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [250 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always with its own window and the windows it refuses, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
 - **Managed plugins above the mod:** `/clear`, resume, a restored window and compaction with the classic and compaction events continued beneath the user tier, the same events delivered twice or out of order without a second window, warning or reset, a window and a model change carried through an in-process resume, a transcript that turns old enough to be cold after its resume, a rewind told apart from a compaction, a summary write that is no cold write beside a cold write that is (a guarded send compacted before its first request, two compactions in one turn), an end of the old conversation that overlaps or outlasts the classic resume, and a `/keepwarm` run before the host reports the next conversation's id.
-- **Pricing and display:** a row for every listed model, the Haiku 5.5 long-prompt tier priced per request, Opus 4 and 4.1 apart from Opus 4.5, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
+- **Pricing and display:** a row for every listed model in its dated, provider and display-name spellings, no borrowed row for a version the table does not list, a cold write with no price row counted apart from the dollar total, the Haiku 5.5 long-prompt tier priced per request, a long warm turn whose requests together write half the context kept apart from a cold write, Opus 4 and 4.1 apart from Opus 4.5, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
 - **Indicator:** terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
 - **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
 - **Fork failures:** a busy API is retried while the cache is warm, a retry that wakes too late is dropped, nothing to fork waits for the next turn, one ping is out at a time, a reply that lands after a request, `/clear` or compaction is discarded, and other failures and the null result returned by older releases stop without retrying.
@@ -192,3 +196,7 @@ Generated declarations live in `.claude-plugin/types/`. Keep them untracked.
 ## Reading the state from another mod
 
 cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It is experimental until 3.0: fields may change in a minor release. `cold` is the same one-hour estimate `/cache-tax` shows, not a check of the server's cache. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.
+
+## More Claude Code mods
+
+cache-tax is one of the [prompt cache mods for Claude Code](https://mods.aidojo.si/topics/prompt-cache/) listed in [Awesome Claude Code Mods](https://github.com/karanb192/awesome-claude-code-mods). Browse the full catalogue at [mods.aidojo.si](https://mods.aidojo.si/) to find a mod by task and see what it can access before you install it.
