@@ -34,6 +34,10 @@ export type CacheTaxStatus = {
   stopped: string | null
   /** Cold writes this session. */
   coldWrites: number
+  /** Whether this open window is waiting for a new turn after reaching its ping budget. */
+  pingSkipped: boolean
+  /** Observed ping cost in this idle break; null if a receipt had no price row. Resets on a main turn. */
+  idlePingUsd: number | null
 }
 
 export type CacheTax = {

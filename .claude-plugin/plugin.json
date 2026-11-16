@@ -32,7 +32,7 @@
     "pingFloor": {
       "type": "number",
       "title": "Ping floor",
-      "description": "A keepwarm ping goes out only when re-writing the context would cost at least this many times a ping. 2 by default; 0 never skips a ping.",
+      "description": "Limit each idle break's ping spend to the estimated rewrite cost divided by this number, including the next estimated ping. 2 by default; 0 disables the limit. The first ping has no receipt to estimate from.",
       "default": 2,
       "min": 0
     }
