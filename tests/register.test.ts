@@ -11,7 +11,7 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
 
-const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
+const session: SessionStartInput = { surface: null, isInteractive: true, cwd: '/work' }
 
 const usage = (over: Partial<TurnUsage> = {}): TurnUsage => ({
   input_tokens: 2, output_tokens: 10, cache_read_input_tokens: 200000, cache_creation_input_tokens: 500, model: 'claude-fable-5-1', ...over,
@@ -402,7 +402,7 @@ describe('guard', () => {
     // The refused send's process stored its ack; this one rebuilds the last request time a second later.
     const store = new Map<string, unknown>([['acked:S1', 8 * HOUR + 1000]])
     const w = world(on, [], { store })
-    await $.session.start(session)
+    await $.session.start({ ...session, isInteractive: false })
     await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
     const resend = await $.prompt.submit(prompt('hi'))
     expect(resend.drop).toBe(undefined)
@@ -568,7 +568,7 @@ describe('guard', () => {
     await clock.advance(3 * HOUR)
     expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
     for (const bad of ['refuse 0', 'refuse -1', 'refuse five', 'warn 5', 'refuse 5 0']) {
-      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes warn, refuse, refuse with a dollar floor such as refuse 5, or test/)
+      expect((await $.command.run(run('cache-tax', `guard ${bad}`))).text).toMatch(/takes default, warn, refuse, refuse with a dollar floor such as refuse 5, or test/)
     }
     expect(store.get('guard')).toBe(5)
     await $.command.run(run('cache-tax', 'guard refuse'))
@@ -1225,6 +1225,144 @@ describe('always after /clear', () => {
 })
 
 describe('guard by origin', () => {
+  test('the send opt-in waits until stored guard preferences are loaded', { options: { headless: 'send' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let release = () => {}
+    let opened = () => {}
+    const waiting = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [], { store: new Map([['guard', 'refuse']]), storeGate: async (op, key) => {
+      if (op === 'get' && key === 'guard') await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    const starting = $.session.start({ ...session, isInteractive: false })
+    await waiting
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const result = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+    release()
+    await starting
+    expect(result.drop).toMatch(/^cache-tax:/)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const initial of ['refuse', 5]) {
+    test(`guard default clears ${initial} and restores the headless option`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>([['guard', initial]])
+      const w = world(on, [], { store })
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      await $.command.run(run('cache-tax', 'guard default'))
+      expect(store.has('guard')).toBe(false)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
+  for (const interactive of [false, true]) {
+    test(`an SDK host can answer the guard dialog (interactive ${interactive})`, { options: { headless: 'guard' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      const asked = answering(on, 'Send anyway ($4.01)')
+      await $.session.start({ ...session, isInteractive: interactive })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+      expect(asked.length).toBe(1)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
+  test('the send option still asks an interactive SDK-origin prompt', { options: { headless: 'send' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, null)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/^cache-tax:/)
+    expect(asked.length).toBe(1)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const persisted of [false, true]) {
+    test(`an explicit refuse at any price overrides send (persisted ${persisted})`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>(persisted ? [['guard', 'refuse']] : [])
+      const w = world(on, [], { store })
+      await $.session.start({ ...session, isInteractive: false })
+      if (!persisted) await $.command.run(run('cache-tax', 'guard refuse'))
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/Headless prompts: send is overridden by guard refuse/)
+      expect(w.entered).toEqual([])
+    })
+  }
+  for (const headless of [undefined, 'guard', 'unknown']) {
+    test(`headless ${String(headless)} preserves refusal and logs the reason`, { options: headless === undefined ? {} : { headless } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+      expect(r.drop).toMatch(/cache-tax: the prompt cache went cold/)
+      expect(w.logs.at(-1)).toBe(r.drop)
+      expect(w.entered).toEqual([])
+    })
+  }
+
+  for (const kind of ['composer', 'bridge', 'unclassified'] as const) {
+    test(`headless send keeps ${kind} prompts guarded`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind } })).drop).toMatch(/^cache-tax:/)
+      expect(w.entered).toEqual([])
+    })
+  }
+
+  for (const [floor, model, refused] of [[4, 'claude-fable-5-1', true], [5, 'claude-fable-5-1', false], [5, 'unknown', true]] as const) {
+    test(`headless send honors floor ${floor} on ${model}`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [], { model })
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn({ usage: usage({ model }) }))
+      await $.command.run(run('cache-tax', `guard refuse ${floor}`))
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+      expect(Boolean(r.drop)).toBe(refused)
+      expect(w.entered.length).toBe(refused ? 0 : 1)
+    })
+  }
+
+  test('an opted-in headless run keeps the stored refusal resend path', { options: { headless: 'send' } }, async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>([['guard', 4], ['acked:S1', 8 * HOUR]])
+    const w = world(on, [], { store })
+    await $.session.start({ ...session, isInteractive: false })
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000 })
+    expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('an opted-in cold headless SDK prompt is sent and scored', { options: { headless: 'send' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, isInteractive: false })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+    expect(r.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/Sending anyway, since Headless prompts is set to send/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid/)
+  })
+
   for (const kind of ['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'observer'] as const) {
     test(`a cold ${kind} prompt is sent and scored, and the next typed prompt is still refused`, async ($, on) => {
       const clock = mock.clock(on, { now: START })
@@ -2958,7 +3096,7 @@ describe('ask before a cold send', () => {
     const store = new Map<string, unknown>()
     world(on, [], { store })
     answering(on, null)
-    await $.session.start(session)
+    await $.session.start({ ...session, isInteractive: false })
     await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
     expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/Send it again to pay it/)
     expect(store.get('acked:S1')).toBe(8 * HOUR)
