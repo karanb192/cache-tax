@@ -11,6 +11,9 @@ const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
 const MAX_ALWAYS_MS = 168 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
+/** A warm ping reads the prefix and writes only its own message: a write of this share of the read or more means the prefix broke. */
+const WARM_WRITE_SHARE = 0.1
+const DEFAULT_PING_FLOOR = 2
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
@@ -74,7 +77,7 @@ const LONG_PRICES: Record<string, Price> = {
   'haiku-5-5': [0.05, 1, 2.5],
 }
 
-type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
+type PingRecord = { at: number; read: number; write: number; input: number; output: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
@@ -109,6 +112,12 @@ export type State = {
   pending: { cancel: () => void } | null
   statusRefresh: { cancel: () => void } | null
   last: PingRecord | null
+  warmReceipts: PingRecord[]
+  idleSpentUsd: number | null
+  idleGen: number
+  /** This break reached its budget; the window waits for the cold mark or the next turn. */
+  skipping: boolean
+  skipSaid: boolean
   stopped: string | null
   /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
   testOnce: boolean
@@ -225,6 +234,8 @@ function saveText(s: State, now: number): string {
   const cold = coldUsd(s)
   const warm = warmUsd(s)
   if (!holds(s, now)) return `${KEEP_LABEL} ${cold == null ? 'pays nothing' : `saves ${fmtUsd(cold)}`}; after ${SEND_LABEL}, keepwarm stays off (/keepwarm to arm it).`
+  if (pingFloor > 0) return `${KEEP_LABEL} ${cold == null ? 'pays nothing' : `saves ${fmtUsd(cold)}`}; after ${SEND_LABEL}, keepwarm is armed for up to ${fmtDuration(holdMs(s, now))}.` +
+    (warm == null ? '' : ` The cache read alone is about ${fmtUsd(warm)} per ping.`) + (cold == null ? '' : ' Pings may stop sooner at the idle spending limit, leaving the cache to go cold.')
   if (cold == null || warm == null) return `${KEEP_LABEL} pays nothing; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s, now))}.`
   return `${KEEP_LABEL} saves ${fmtUsd(cold)}; after ${SEND_LABEL}, keepwarm holds the cache for ${fmtDuration(holdMs(s, now))} ` +
     `at about ${fmtUsd(warm)} a ping, so the next break does not cost ${fmtUsd(cold)} again.`
@@ -268,6 +279,13 @@ export function resetForClear(s: State) {
   s.stepWrites = null
   s.steps = 0
   s.testOnce = false
+  // The last receipt priced the old conversation's context; the next one's first ping makes its own.
+  s.last = null
+  s.warmReceipts = []
+  s.idleSpentUsd = 0
+  s.idleGen++
+  s.skipping = false
+  s.skipSaid = false
   outdate(s)
   disarm(s)
 }
@@ -317,6 +335,7 @@ function statusText(s: State, now: number): string | undefined {
     : s.compacted ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : s.waitForTurn ? ' · nothing to fork yet, first ping after the next turn'
+    : s.skipping ? ` · ping skipped, idle budget ${fmtUsd(coldUsd(s) == null ? null : coldUsd(s)! / pingFloor)} reached`
     : s.retries ? ` · API busy, ping retry ${s.retries} of ${MAX_RETRIES}`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
@@ -337,6 +356,8 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
     cold: known ? isCold(s, now) : null,
     stopped: s.stopped,
     coldWrites: s.misses.length,
+    pingSkipped: open && s.skipping,
+    idlePingUsd: s.idleSpentUsd,
   }
 }
 
@@ -414,6 +435,8 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
   s.every = PING_AFTER_MS
   s.stopped = why
   s.retries = 0
+  s.skipping = false
+  s.skipSaid = false
   outdate(s)
   disarm(s)
   await $.store.delete(deadlineKey(s))
@@ -483,8 +506,8 @@ async function arm($: EngineInterface, s: State) {
   // A cold window still needs expiry cleanup, but must not send a model request.
   if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
     const untilCold = s.lastRequestAt + TTL_MS - now
-    // Waiting for a turn sends nothing, but wakes when the cache goes cold so the row says so.
-    if (s.waitForTurn) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
+    // Waiting for a turn, or past a skipped ping, sends nothing, but wakes when the cache goes cold so the row says so.
+    if (s.waitForTurn || s.skipping) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
     else {
       const delay = Math.min(s.deadline - now, untilCold, Math.max(1000, s.lastRequestAt + s.every - now))
       s.pending = $.clock.after(delay, () => { void ping($, s) })
@@ -499,10 +522,12 @@ async function ping($: EngineInterface, s: State) {
   s.pending = null
   if (!s.deadline) return
   const tick = s.tick
+  const model = await $.session.model()
   const now = await $.clock.now()
   // A timer set or cancelled while the clock was read (an extension, a retry, a turn) owns the window now;
   // if that left no timer, a window still open is armed again rather than left without one.
   if (s.tick !== tick) return s.pending || s.inFlight ? undefined : arm($, s)
+  if (model) s.lastModel = model
   // One fork at a time: the one already out re-arms when it settles. Checked after the await, and set
   // below with no await in between, so two timers can never both send.
   if (s.inFlight) return
@@ -513,12 +538,29 @@ async function ping($: EngineInterface, s: State) {
   if (now - s.lastRequestAt < s.every - 1000) return arm($, s)
   // A host that slept past a retry's slot must not send it inside the last minute.
   if (s.retries && now >= s.lastRequestAt + TTL_MS - MIN_PING_MS) return stop($, s, s.retryReason + afterRetries(s.retries))
+  if (underFloor(s)) {
+    if (!s.skipSaid) $.ui.log(skipText(s))
+    s.skipSaid = true
+    s.skipping = true
+    return arm($, s)
+  }
   const gen = s.gen
   const sentAt = s.lastRequestAt
+  const sid = s.sid
+  const idleGen = s.idleGen
   s.inFlight = true
   const sent = await $.model.fork({ prompt: PING_PROMPT }).then(reply => ({ reply }), (err: unknown) => ({ err }))
   const at = await $.clock.now()
   s.inFlight = false
+  // Stopping a timer cannot refund an already-sent request. Only a new break or conversation drops its spend.
+  if (s.sid === sid && s.idleGen === idleGen && 'reply' in sent && sent.reply && 'usage' in sent.reply) {
+    const u = sent.reply.usage
+    const price = priceOf(model, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
+    const usd = price ? pingUsd(u, price) : null
+    s.idleSpentUsd = s.idleSpentUsd == null || usd == null ? null : s.idleSpentUsd + usd
+    const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < WARM_WRITE_SHARE * u.cache_read_input_tokens
+    if (sent.reply.isAnswered && warm) s.warmReceipts = [...s.warmReceipts, { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, output: u.output_tokens, usd, warm }].slice(-5)
+  }
   // Checked after the last await. A stop, /clear, resume or compaction, or a main request that moved the
   // cache clock, replaced what this fork was sent for: its reply is dropped and the window armed afresh.
   if (gen !== s.gen || s.lastRequestAt !== sentAt) return s.pending ? undefined : arm($, s)
@@ -552,14 +594,35 @@ async function ping($: EngineInterface, s: State) {
     return stop($, s, reason + afterRetries(s.retries))
   }
   const u = reply.usage
-  const price = priceOf(s.lastModel, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
-  // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
-  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
+  const price = priceOf(model, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
+  const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < WARM_WRITE_SHARE * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
-  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
+  s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, output: u.output_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
+  s.skipSaid = false
   s.lastRequestAt = now
   await arm($, s)
+}
+
+function nextPingUsd(s: State): number | null {
+  const estimates = s.warmReceipts.map(last => {
+    const write = Math.min(last.write, WARM_WRITE_SHARE * s.ctx)
+    const price = priceOf(s.lastModel, s.ctx + write + last.input)
+    return price ? pingUsd({ cache_read_input_tokens: s.ctx, cache_creation_input_tokens: write, input_tokens: last.input, output_tokens: last.output }, price) : null
+  }).filter((price): price is number => price != null)
+  return estimates.length ? Math.min(...estimates) : null
+}
+
+function underFloor(s: State): boolean {
+  const rewrite = coldUsd(s)
+  const ping = nextPingUsd(s)
+  return pingFloor > 0 && s.ctx > 0 && rewrite != null && ping != null && s.idleSpentUsd != null &&
+    s.idleSpentUsd + ping >= rewrite / pingFloor
+}
+
+function skipText(s: State): string {
+  return `keepwarm skipped a ping: this break spent ${fmtUsd(s.idleSpentUsd)}; the next ping is estimated at ${fmtUsd(nextPingUsd(s))}, reaching the rewrite (${fmtUsd(coldUsd(s))}) divided by ${pingFloor}. ` +
+    'The cache is left to go cold; your next turn starts a new budget. Ping floor 0 disables this limit.'
 }
 
 function afterRetries(n: number): string {
@@ -580,6 +643,15 @@ let autoWarm = true
 /** Reads the "autoWarm" option: anything but "off" keeps the default, on. */
 export const autoWarmFrom = (options: Record<string, unknown> | undefined): boolean => options?.autoWarm !== 'off'
 
+/** Divides a rewrite into the idle-break budget; 0 disables the comparison. */
+let pingFloor = DEFAULT_PING_FLOOR
+
+/** Reads the "pingFloor" option: a number of 0 or more, else the default. */
+export const pingFloorFrom = (options: Record<string, unknown> | undefined): number => {
+  const value = options?.pingFloor
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : DEFAULT_PING_FLOOR
+}
+
 /** Whether a paid cold write leaves keepwarm holding the cache: always on, the Auto keepwarm option, or a window armed by hand. */
 function holds(s: State, now: number): boolean {
   return autoWarm || s.always || s.deadline > now
@@ -588,12 +660,14 @@ function holds(s: State, now: number): boolean {
 /** What the guard says about keepwarm after a paid cold write; `then` is the wording of the refusal. */
 function holdNote(s: State, now: number, then: boolean): string {
   if (!holds(s, now)) return 'keepwarm stays off (/keepwarm to arm it)'
+  if (pingFloor > 0) return `keepwarm will be armed for up to ${fmtDuration(holdMs(s, now))}` + (coldUsd(s) == null ? '' : ', but may stop sooner at the idle spending limit')
   return then ? `keepwarm will then hold the cache for ${fmtDuration(holdMs(s, now))}` : `keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands`
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
-  if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn`
-  return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written`
+  if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
+  return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written` +
+    (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
 }
 
 // A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
@@ -653,13 +727,14 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
-    resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, stopped: null,
+    resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, warmReceipts: [], idleSpentUsd: 0, idleGen: 0, skipping: false, skipSaid: false, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false,
   }
 }
 
 export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
+  pingFloor = pingFloorFrom(options)
   const s = freshState()
   s.display = displayOf(options)
   let headless = false
@@ -809,7 +884,7 @@ export const register: Register = (on, options) => {
       await $.store.set(KEY_ALWAYS, windowMs === DEFAULT_WINDOW_MS ? true : windowMs)
       await startWindow($, s, windowMs, PING_AFTER_MS)
       const cold = isCold(s, now) ? `. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` : ''
-      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(windowMs)} after its last turn; /keepwarm off turns it off for good${cold}` }
+      return { text: `keepwarm always on: every session is armed for up to ${fmtDuration(windowMs)} after its last turn; /keepwarm off turns it off for good${cold}` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '') }
     }
     if (!words.length) {
       await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
@@ -981,8 +1056,14 @@ export const register: Register = (on, options) => {
     s.compacted = false
     if (s.lastRequestAt) s.resumedAt = 0
     s.waitForTurn = false
+    if (e.usage || (!e.isAborted && e.reason !== 'error')) {
+      s.skipping = false
+      s.skipSaid = false
+      s.idleSpentUsd = 0
+      s.idleGen++
+    }
     s.ackedAt = 0
-    // Always covers any break up to its window (six hours unless /keepwarm always <window> set another) after a turn
+    // Always covers a break within the idle budget and its window (six hours unless set otherwise) after a turn
     // that reached the cache (a turn that failed before any response touched nothing, and its cache may be cold): a
     // window of at least that length at the default period, which brings back a stopped window and replaces a shorter
     // one or a testing period. Another session's /keepwarm off or /keepwarm always changes the shared switch and its
@@ -1026,7 +1107,7 @@ export const register: Register = (on, options) => {
         const extend = autoWarm && !s.always && s.deadline < now + AUTO_WARM_MS && s.offs === offs
         if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
-          (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
+          (extend ? pingFloor > 0 ? ` Keepwarm armed for up to ${fmtDuration(AUTO_WARM_MS)}` + (coldUsd(s) == null ? '' : '; pings may stop sooner at the idle spending limit') + '. /keepwarm off to stop.' : ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
       }
     }
     s.coldWritePending = false

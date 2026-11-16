@@ -3,7 +3,7 @@ import type { Engine, Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { autoWarmFrom, fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { autoWarmFrom, fmtDuration, freshState, parseDuration, pingFloorFrom, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -58,7 +58,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: typeof opts.sid === 'function' ? opts.sid() : opts.sid ?? 'S1' }))
-  on('session.model', () => ({ value: (typeof opts.model === 'function' ? opts.model() : opts.model) ?? 'claude-fable-5-1' }))
+  on('session.model', async () => { await opts.modelGate?.(); return { value: (typeof opts.model === 'function' ? opts.model() : opts.model) ?? 'claude-fable-5-1' } })
   on('session.usage', () => ({ value: { startedAt: opts.startedAt?.() ?? START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: [] } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) }))
@@ -587,7 +587,7 @@ describe('guard', () => {
     await $.prompt.submit(prompt('hi'))
     await $.prompt.submit(prompt('hi'))
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
-    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keeping the cache warm for 3h00m/)
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
     expect(w.status.at(-1)).toMatch(/^keepwarm 3h00m left · ping in 50m/)
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(1)
@@ -813,7 +813,7 @@ describe('keepwarm', () => {
     const w = world(on, [], { store })
     await $.session.start(session)
     const r = await $.command.run(run('keepwarm', 'always'))
-    expect(r.text).toMatch(/^keepwarm always on: every session stays warm until 6h00m after its last turn/)
+    expect(r.text).toMatch(/^keepwarm always on: every session is armed for up to 6h00m after its last turn/)
     expect(store.get('always')).toBe(true)
     expect(store.get('deadline:S1')).toBe(START + 6 * HOUR)
     expect(w.status.at(-1)).toBe('keepwarm 6h00m left · waiting for the first turn')
@@ -837,7 +837,7 @@ describe('keepwarm', () => {
 
   test('the ping figure counts output tokens at the model\'s rate, Sonnet 5 priced as itself', async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const w = world(on, [{ read: 200000, write: 0, out: 1000 }])
+    const w = world(on, [{ read: 200000, write: 0, out: 1000 }], { model: 'claude-sonnet-5' })
     await $.session.start(session)
     await $.command.run(run('keepwarm', '6h'))
     await $.turn.complete(turn({ usage: usage({ model: 'claude-sonnet-5' }) }))
@@ -878,7 +878,7 @@ describe('keepwarm', () => {
 
   test('the ping figure counts uncached input at the base rate', async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const w = world(on, [{ read: 200000, write: 0, input: 50000, out: 1000 }])
+    const w = world(on, [{ read: 200000, write: 0, input: 50000, out: 1000 }], { model: 'claude-sonnet-5' })
     await $.session.start(session)
     await $.command.run(run('keepwarm', '6h'))
     await $.turn.complete(turn({ usage: usage({ model: 'claude-sonnet-5' }) }))
@@ -902,7 +902,7 @@ describe('keepwarm', () => {
     await $.turn.complete(turn())
     await clock.advance(15 * 24 * HOUR)
     const r = await $.command.run(run('keepwarm', ''))
-    expect(r.text).toBe('keepwarm on for 6h00m. The cache is cold now, so the first ping comes 50m after the next turn')
+    expect(r.text).toBe('keepwarm on for 6h00m. The cache is cold now, so the first ping comes 50m after the next turn; pings may stop sooner at the idle spending limit')
     expect(w.status.at(-1)).toBe('keepwarm 6h00m left · cold now, first ping 50m after the next turn')
     await clock.advance(1 * MIN)
     expect(w.forks.length).toBe(0)
@@ -933,7 +933,7 @@ describe('keepwarm', () => {
     await clock.advance(1 * MIN)
     expect(w.forks.length).toBe(0)
     const r = await $.command.run(run('keepwarm', 'always'))
-    expect(r.text).toBe('keepwarm always on: every session stays warm until 6h00m after its last turn; /keepwarm off turns it off for good. The cache is cold now, so the first ping comes 50m after the next turn')
+    expect(r.text).toBe('keepwarm always on: every session is armed for up to 6h00m after its last turn; /keepwarm off turns it off for good. The cache is cold now, so the first ping comes 50m after the next turn; pings may stop sooner at the idle spending limit')
     await clock.advance(60 * MIN)
     expect(w.forks.length).toBe(0)
     await $.turn.complete(turn())
@@ -2092,7 +2092,7 @@ describe('always, from the PR review', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     await clock.advance(2 * HOUR)
-    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 6h00m\./)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will be armed for up to 6h00m, but may stop sooner at the idle spending limit\./)
     await $.prompt.submit(prompt('hi'))
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
     expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
@@ -2104,10 +2104,10 @@ describe('always, from the PR review', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     await clock.advance(2 * HOUR)
-    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 3h00m\./)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will be armed for up to 3h00m, but may stop sooner at the idle spending limit\./)
     await $.prompt.submit(prompt('hi'))
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
-    expect(w.logs.at(-1)).toMatch(/^cold write of 200k tokens paid \(\$4\.00\)\. Keeping the cache warm for 3h00m/)
+    expect(w.logs.at(-1)).toMatch(/^cold write of 200k tokens paid \(\$4\.00\)\. Keepwarm armed for up to 3h00m/)
   })
 
   test('/keepwarm off in another session stops this one rolling at its next turn', async ($, on) => {
@@ -2705,7 +2705,7 @@ describe('always with a window of its own', () => {
     const w = world(on, [], { store })
     await $.session.start(session)
     const r = await $.command.run(run('keepwarm', 'always 24h'))
-    expect(r.text).toMatch(/^keepwarm always on: every session stays warm until 24h00m after its last turn/)
+    expect(r.text).toMatch(/^keepwarm always on: every session is armed for up to 24h00m after its last turn/)
     expect(store.get('always')).toBe(24 * HOUR)
     expect(store.get('deadline:S1')).toBe(START + 24 * HOUR)
     expect(w.status.at(-1)).toBe('keepwarm 24h00m left · waiting for the first turn')
@@ -2762,7 +2762,7 @@ describe('always with a window of its own', () => {
     world(on, [], { store })
     await $.session.start(session)
     const r = await $.command.run(run('keepwarm', 'always'))
-    expect(r.text).toMatch(/until 6h00m after its last turn/)
+    expect(r.text).toMatch(/up to 6h00m after its last turn/)
     expect(store.get('always')).toBe(true)
   })
 
@@ -2772,7 +2772,7 @@ describe('always with a window of its own', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     await clock.advance(2 * HOUR)
-    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will then hold the cache for 24h00m\./)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/keepwarm will be armed for up to 24h00m, but may stop sooner at the idle spending limit\./)
   })
 
   test('off forgets the stored window', async ($, on) => {
@@ -2833,10 +2833,10 @@ describe('ask before a cold send', () => {
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
-    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?`)
+    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
     expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
-    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keeping the cache warm for 3h00m/)
+    expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
   })
 
   test("Don't send drops it unpaid, and the resend asks again", async ($, on) => {
@@ -2893,23 +2893,45 @@ describe('ask before a cold send', () => {
     await $.turn.complete(turn())
     await $.prompt.submit(prompt('two'))
     expect(w.entered).toEqual(['one', 'two'])
-    expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?`])
+    expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`])
     expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
     const card = await $.command.run(run('cache-tax', 'status'))
     expect(card.text).toMatch(/session     0 cold writes paid/)
   })
 
-  test('an unpriced model is asked with a bare Send anyway and no savings figure', async ($, on) => {
+  test('an unpriced model has no savings figure or idle spending limit in its messages', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [], { model: 'some-future-model' })
-    const asked = answering(on, 'Send anyway')
+    const asked = answering(on, null)
     await $.session.start(session)
     await $.turn.complete(turn({ usage: usage({ model: 'some-future-model' }) }))
     await clock.advance(3 * HOUR)
+    expect((await $.command.run(run('keepwarm', '1h'))).text).not.toMatch(/idle spending limit/)
+    const refused = await $.prompt.submit(prompt('hi'))
+    expect(refused.drop).toMatch(/keepwarm will be armed for up to 3h00m\./)
+    expect(refused.drop).not.toMatch(/idle spending limit/)
+    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
+    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Send it anyway\?$/)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
-    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
-    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm holds the cache for 3h00m\. Send it anyway\?$/)
+    await $.turn.complete(turn({ usage: usage({ model: 'some-future-model', cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 201k tokens paid (n/a). Keepwarm armed for up to 3h00m. /keepwarm off to stop.')
+    expect((await $.command.run(run('keepwarm', '1h'))).text).not.toMatch(/idle spending limit/)
+    expect((await $.command.run(run('keepwarm', 'always'))).text).not.toMatch(/idle spending limit/)
+  })
+
+  test('a disabled Ping floor keeps the uncapped guard and cold-write wording', { options: { pingFloor: 0 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(asked[0]!.question).toMatch(/keepwarm holds the cache for 3h00m at about \$0\.05 a ping, so the next break does not cost \$4\.01 again\./)
+    expect(asked[0]!.question).not.toMatch(/idle spending limit/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 201k tokens paid ($4.01). Keeping the cache warm for 3h00m so it is not paid again today; /keepwarm off to stop.')
   })
 
   test("guard test with Don't send drops the prompt", async ($, on) => {
@@ -3151,7 +3173,7 @@ describe('the Auto keepwarm option', () => {
     await clock.advance(20 * MIN)
     const forks = w.forks.length
     expect((await $.prompt.submit(prompt('hi'))).drop).toBe(undefined)
-    expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm holds the cache for 1h10m at about/)
+    expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm is armed for up to 1h10m/)
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
     expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm/)
@@ -3168,7 +3190,7 @@ describe('the Auto keepwarm option', () => {
     await $.command.run(run('cache-tax', 'guard warn'))
     await clock.advance(7 * HOUR)
     await $.prompt.submit(prompt('hi'))
-    expect(w.logs.at(-1)).toMatch(/Sending anyway; keepwarm will hold the cache for 6h00m once it lands/)
+    expect(w.logs.at(-1)).toMatch(/Sending anyway; keepwarm will be armed for up to 6h00m, but may stop sooner/)
     const forks = w.forks.length
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.status.at(-1)).toMatch(/^keepwarm 6h00m left/)
@@ -3189,7 +3211,7 @@ describe('always with a window of its own, beside the guard question', () => {
       // Pings hold the cache through the 24h window; it goes cold an hour after they stop.
       await clock.advance(25 * HOUR)
       await $.prompt.submit(prompt('hi'))
-      expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm holds the cache for 24h00m at about/)
+      expect(asked.at(-1)?.question).toMatch(/after Send anyway, keepwarm is armed for up to 24h00m/)
     })
   }
 })
@@ -3268,10 +3290,10 @@ describe('always with a window of its own, against a finishing turn and a paid c
     await $.command.run(run('cache-tax', 'guard warn'))
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
-    expect(w.logs.at(-1)).toMatch(/keepwarm will hold the cache for 1h00m once it lands/)
+    expect(w.logs.at(-1)).toMatch(/keepwarm will be armed for up to 1h00m, but may stop sooner/)
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid/)
-    expect(w.logs.at(-1)).not.toMatch(/Keeping the cache warm for 3h00m/)
+    expect(w.logs.at(-1)).not.toMatch(/Keepwarm armed for up to 3h00m/)
     expect(w.status.at(-1)).toMatch(/^keepwarm 1h00m left/)
   })
 })
@@ -3310,6 +3332,338 @@ describe('$.cacheTax noun', () => {
     expect(await read()).toMatchObject({ always: true, alwaysMs: 24 * HOUR, guard: 'refuse', guardFloorUsd: 5 })
     await $.command.run(run('cache-tax', 'guard warn'))
     expect(await read()).toMatchObject({ guard: 'warn', guardFloorUsd: null })
+  })
+})
+
+describe('limiting ping spend during an idle break', () => {
+  // 20k of context re-writes for $0.40 on Fable 5.1. A ping that reads it and thinks 5,000 tokens costs $0.26, and twice
+  // that is more than the rewrite; one that answers in a token costs half a cent.
+  const small = { live: { tokens: 20000 } }
+  const dear: ForkAnswer = { read: 20000, write: 0, out: 5000 }
+  const cheap: ForkAnswer = { read: 20000, write: 0, out: 1 }
+  const skipped = (logs: string[]) => logs.filter(line => /skipped a ping/.test(line))
+
+  test('caps a long break, exposes the skip, and a main turn resets the budget', { plugins: [peek] }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, Array.from({ length: 60 }, () => warm), { model: 'claude-opus-5-5', live: { tokens: 200000 } })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await $.command.run(run('keepwarm', 'always 48h'))
+    await clock.advance(24 * HOUR)
+    expect(w.forks.length).toBe(19)
+    const before = JSON.parse((await $.command.run(peekCmd)).text!)
+    expect(before.pingSkipped).toBe(true)
+    expect(Math.abs(before.idlePingUsd - 19 * 0.040028) < 1e-6).toBe(true)
+    await $.turn.complete(turn({ usage: undefined, reason: 'error', isAborted: true }))
+    expect(JSON.parse((await $.command.run(peekCmd)).text!).pingSkipped).toBe(true)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    const reset = JSON.parse((await $.command.run(peekCmd)).text!)
+    expect(reset).toMatchObject({ pingSkipped: false, idlePingUsd: 0 })
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(20)
+  })
+
+  test('an expensive outlier does not price every later break', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [cheap, dear, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(skipped(w.logs)).toEqual([])
+  })
+
+  for (const action of ['stop', 'turn'] as const) {
+    test(`a billed ping finishing after ${action} is charged only to its own break`, { plugins: [peek] }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let calls = 0
+      let release = () => {}
+      let opened = () => {}
+      const waiting = new Promise<void>(resolve => { opened = resolve })
+      const w = world(on, [cheap, dear, cheap], { ...small, gate: async () => {
+        if (++calls === 2) await new Promise<void>(resolve => { release = resolve; opened() })
+      } })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '6h'))
+      await clock.advance(50 * MIN)
+      const advance = clock.advance(50 * MIN)
+      await waiting
+      if (action === 'stop') await $.command.run(run('keepwarm', 'off'))
+      else await $.turn.complete(turn())
+      release()
+      await advance
+      const status = JSON.parse((await $.command.run(peekCmd)).text!)
+      if (action === 'stop') {
+        expect(status.idlePingUsd > 0.26).toBe(true)
+        await $.command.run(run('keepwarm', '6h'))
+        expect(JSON.parse((await $.command.run(peekCmd)).text!).idlePingUsd > 0.26).toBe(true)
+        expect(w.forks.length).toBe(2)
+      } else {
+        expect(status.idlePingUsd).toBe(0)
+        await clock.advance(50 * MIN)
+        expect(w.forks.length).toBe(3)
+      }
+    })
+  }
+
+  test('a failed ping with reported usage still consumes the idle budget', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const failed: ForkAnswer = { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: usage({ cache_read_input_tokens: 20000, cache_creation_input_tokens: 0, output_tokens: 5000 }) }
+    const w = world(on, [cheap, failed, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(101 * MIN)
+    expect(w.forks.length).toBe(2)
+    expect(skipped(w.logs).length).toBe(1)
+  })
+
+  test('re-arming without a main turn cannot reset the spent budget', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, Array.from({ length: 60 }, () => warm), { model: 'claude-opus-5-5', live: { tokens: 200000 } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '48h'))
+    await clock.advance(950 * MIN)
+    expect(w.forks.length).toBe(19)
+    await $.command.run(run('keepwarm', 'off'))
+    await $.command.run(run('keepwarm', '48h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(19)
+    expect(skipped(w.logs).length).toBe(1)
+  })
+
+  test('prices the next ping at the live model even without a main turn', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let model = 'claude-fable-5-1'
+    const w = world(on, [cheap, cheap], { ...small, model: () => model })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    model = 'claude-haiku-5-5'
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs)[0]).toMatch(/rewrite \(\$0\.00\)/)
+  })
+
+  test('off during the new model read cancels the pending ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let hold = false
+    let release = () => {}
+    let opened = () => {}
+    const waiting = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [cheap], { ...small, modelGate: async () => {
+      if (hold) await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    hold = true
+    const advance = clock.advance(50 * MIN)
+    await waiting
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await advance
+    expect(w.forks.length).toBe(0)
+    expect(w.status.at(-1)).toBe(undefined)
+  })
+
+  test('the Ping floor is a number of 0 or more, else 2', async () => {
+    expect(pingFloorFrom(undefined)).toBe(2)
+    expect(pingFloorFrom({})).toBe(2)
+    expect(pingFloorFrom({ pingFloor: 0 })).toBe(0)
+    expect(pingFloorFrom({ pingFloor: 1.5 })).toBe(1.5)
+    expect(pingFloorFrom({ pingFloor: -1 })).toBe(2)
+    expect(pingFloorFrom({ pingFloor: '3' })).toBe(2)
+  })
+
+  test('skips at the budget, says why, and lets the cache go cold', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    // No receipt yet: the first ping always goes out.
+    expect(w.forks.length).toBe(1)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs)).toEqual(['keepwarm skipped a ping: this break spent $0.26; the next ping is estimated at $0.26, reaching the rewrite ($0.40) divided by 2. The cache is left to go cold; your next turn starts a new budget. Ping floor 0 disables this limit.'])
+    expect(w.status.at(-1)).toBe('keepwarm 4h20m left · ping skipped, idle budget $0.20 reached · last ping read 20k $0.26')
+    // The skip waits for the cold mark, an hour after the last ping, and sends nothing on the way.
+    await clock.advance(10 * MIN)
+    expect(w.status.at(-1)).toMatch(/· cold now, first ping 50m after the next turn/)
+    await clock.advance(3 * HOUR)
+    expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(2)
+  })
+
+  test('pings while spend including the next estimate stays within budget', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [cheap, cheap, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(150 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(skipped(w.logs)).toEqual([])
+  })
+
+  test('says the reason once per idle break', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(skipped(w.logs).length).toBe(1)
+    // Each turn starts another budget, even when its first ping is already too expensive.
+    for (let i = 0; i < 2; i++) {
+      await clock.advance(5 * MIN)
+      await $.turn.complete(turn())
+      await clock.advance(50 * MIN)
+      expect(w.status.at(-1)).toMatch(/· ping skipped/)
+    }
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(3)
+  })
+
+  test('the Ping floor option divides the rewrite into a budget', { options: { pingFloor: 100 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [cheap, cheap], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs)[0]).toMatch(/next ping is estimated at \$0\.01, reaching the rewrite \(\$0\.40\) divided by 100/)
+  })
+
+  test('a Ping floor of 0 never skips', { options: { pingFloor: 0 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(150 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(skipped(w.logs)).toEqual([])
+  })
+
+  // The receipt priced the context and model of its own moment: a ping now reads today's context at today's prices.
+  test('after a compaction, a ping is priced at the smaller context, not at the old receipt', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live = { tokens: 200000 }
+    const opus = usage({ model: 'claude-opus-5' })
+    const w = world(on, [{ read: 200000, write: 0 }, { read: 15000, write: 0 }], { live, model: 'claude-opus-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: opus }))
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = 15000
+    await $.turn.complete(turn({ usage: opus }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('after a compaction, the last ping\'s cache write is capped at what a warm ping writes against the smaller context', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live = { tokens: 400000 }
+    // Still warm: a write under a tenth of the read.
+    const w = world(on, [{ read: 400000, write: 30000 }, { read: 40000, write: 0 }], { live })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = 40000
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('after a switch to a cheaper model, a ping is priced at the new model, not at the old receipt', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [{ read: 80000, write: 0 }, { read: 80000, write: 0 }], { live: { tokens: 80000 }, model: 'claude-opus-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5' }) }))
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('an unknown context is no cheap rewrite: the ping goes out', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const live: { tokens?: number } = { tokens: 20000 }
+    const w = world(on, [dear, dear], { live })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    // A compaction zeroes the context, and a turn that reports no usage leaves it at zero.
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    live.tokens = undefined
+    await $.turn.complete(turn({ usage: undefined }))
+    await clock.advance(50 * MIN)
+    expect(skipped(w.logs)).toEqual([])
+    expect(w.forks.length).toBe(2)
+  })
+
+  test('/keepwarm off while a skip waits for the cold mark: nothing pings, and a later window says it again', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [dear, dear], small)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(100 * MIN)
+    expect(skipped(w.logs).length).toBe(1)
+    await clock.advance(5 * MIN)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(w.status.at(-1)).toBe(undefined)
+    await clock.advance(HOUR)
+    expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(2)
+  })
+
+  test('/clear while a skip waits: the receipt priced the old conversation, so the new one\'s first ping goes out', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    let sid = 'S1'
+    const w = world(on, [dear, dear], { ...small, store, sid: () => sid })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(100 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(1)
+    await clock.advance(5 * MIN)
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear' })
+    await $.prompt.submit(prompt('hello'))
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(2)
+    expect(w.status.at(-1)).toMatch(/· ping in 50m · last ping read 20k \$0\.26/)
   })
 })
 
