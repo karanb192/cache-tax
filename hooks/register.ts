@@ -81,8 +81,14 @@ type PingRecord = { at: number; read: number; write: number; input: number; outp
 type Miss = { at: number; tokens: number; usd: number | null }
 /** warn, or refuse once when the cold-write estimate is at least this many dollars; 0 refuses any. */
 type GuardMode = 'warn' | number
+/** Where the state shows: the band above the prompt or the status entry. There is no hidden mode: pings cost tokens, so the screen always says when they run. */
+export type Display = 'band' | 'status'
+
+export const displayOf = (options: Readonly<Record<string, unknown>>): Display =>
+  options.display === 'status' ? 'status' : 'band'
 
 export type State = {
+  display: Display
   hasBand: boolean
   sid: string
   deadline: number
@@ -147,8 +153,8 @@ function familyOf(model: string | null): string {
 
 function priceOf(model: string | null, promptTokens: number): Price | null {
   const family = familyOf(model)
-  if (promptTokens > LONG_PROMPT_TOKENS && Object.hasOwn(LONG_PRICES, family)) return LONG_PRICES[family]
-  return Object.hasOwn(PRICES, family) ? PRICES[family] : null
+  if (promptTokens > LONG_PROMPT_TOKENS && Object.hasOwn(LONG_PRICES, family)) return LONG_PRICES[family] ?? null
+  return Object.hasOwn(PRICES, family) ? (PRICES[family] ?? null) : null
 }
 
 export function parseDuration(text: string): number | null {
@@ -356,9 +362,16 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
   }
 }
 
+function cacheState(s: State, now: number) {
+  return s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+}
+
 function updateStatus($: EngineInterface, s: State, now: number) {
   if (s.hasBand) $.ui.invalidate('ui.render')
-  else $.ui.status(statusText(s, now))
+  else {
+    const text = statusText(s, now)
+    $.ui.status(text && s.display === 'status' ? `cache-tax · ${cacheState(s, now)} · ${text}` : text)
+  }
   if (s.deadline > now && !s.statusRefresh) {
     // Repaint the countdown independently of the model-request and retry timers.
     const refresh = $.clock.every(STATUS_REFRESH_MS, () => {
@@ -714,7 +727,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
+    display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, warmReceipts: [], idleSpentUsd: 0, idleGen: 0, skipping: false, skipSaid: false, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false,
   }
@@ -724,6 +737,7 @@ export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
   pingFloor = pingFloorFrom(options)
   const s = freshState()
+  s.display = displayOf(options)
   let light = false
   let noColor = false
 
@@ -747,7 +761,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
-    const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+    const state = cacheState(s, now)
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
@@ -770,7 +784,8 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    s.hasBand = e.surface === 'terminal' || e.surface === 'desktop'
+    // `display: status` leaves the row above the prompt to others and shows the state as a status entry.
+    s.hasBand = s.display === 'band' && (e.surface === 'terminal' || e.surface === 'desktop')
     if (s.hasBand) {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')
@@ -852,7 +867,7 @@ export const register: Register = (on, options) => {
     }
     if (words[0] === 'always') {
       // One optional window and nothing after it: a dropped trailing word would arm something other than what was typed.
-      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]) : null
+      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]!) : null
       if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
       s.always = true
       s.alwaysMs = windowMs
@@ -869,7 +884,7 @@ export const register: Register = (on, options) => {
       return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
     }
     if (words[0] !== 'status') {
-      const window = parseDuration(words[0])
+      const window = parseDuration(words[0]!)
       if (!window) return { text: 'keepwarm takes a window such as 6h or 90m, or always, off, or status' }
       // "every 2m" is a testing knob and lasts only for the window it was given with.
       let every = PING_AFTER_MS

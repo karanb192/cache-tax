@@ -1,5 +1,5 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
-import type { Plugin, TestBody } from 'claude-code/testing'
+import type { Engine, Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
@@ -2675,7 +2675,7 @@ describe('always with a window of its own', () => {
 function answering(on: On, answer: string | null) {
   const asked: Array<{ question: string; options: string[] }> = []
   on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
-    const q = e.questions[0]
+    const q = e.questions[0]!
     asked.push({ question: q.question, options: q.options.map(o => o.label) })
     if (answer === null) return { deny: 'dismissed' }
     return { result: { questions: e.questions, answers: { [q.question]: answer } } }
@@ -2695,8 +2695,8 @@ describe('ask before a cold send', () => {
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
-    expect(asked[0].question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
-    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
   })
@@ -2756,7 +2756,7 @@ describe('ask before a cold send', () => {
     await $.prompt.submit(prompt('two'))
     expect(w.entered).toEqual(['one', 'two'])
     expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`])
-    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
     const card = await $.command.run(run('cache-tax', 'status'))
     expect(card.text).toMatch(/session     0 cold writes paid/)
   })
@@ -2770,8 +2770,8 @@ describe('ask before a cold send', () => {
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
-    expect(asked[0].options).toEqual(['Send anyway', "Don't send"])
-    expect(asked[0].question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Pings may stop sooner at the idle spending limit, leaving the cache to go cold\. Send it anyway\?$/)
+    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
+    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Pings may stop sooner at the idle spending limit, leaving the cache to go cold\. Send it anyway\?$/)
   })
 
   test("guard test with Don't send drops the prompt", async ($, on) => {
@@ -2861,7 +2861,7 @@ describe('ask before a cold send', () => {
     let opened = () => {}
     const open = new Promise<void>(r => { opened = r })
     on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
-      const q = e.questions[0]
+      const q = e.questions[0]!
       const a = await new Promise<string>(r => { answer = r; opened() })
       return { result: { questions: e.questions, answers: { [q.question]: a } } }
     })
@@ -2892,7 +2892,7 @@ describe('ask before a cold send', () => {
     on('clock.after', () => new Promise<{ value: void }>(() => {}))
     const w = world(on, [])
     on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
-      const q = e.questions[0]
+      const q = e.questions[0]!
       // The mod's next clock read, the one after the answer, is held.
       hold = new Promise<void>(r => { releaseClock = r })
       return { result: { questions: e.questions, answers: { [q.question]: 'Send anyway ($4.01)' } } }
@@ -2918,7 +2918,7 @@ describe('ask before a cold send', () => {
     model = 'claude-fable-5-1'
     await $.command.run(run('cache-tax', 'guard test'))
     await $.prompt.submit(prompt('hi'))
-    expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
   })
 
   test('an answer that arrives after a resume moved the process sends, scores and stores nothing', async ($, on) => {
@@ -2931,7 +2931,7 @@ describe('ask before a cold send', () => {
     const open = new Promise<void>(r => { opened = r })
     const asked: string[] = []
     on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e) => {
-      const q = e.questions[0]
+      const q = e.questions[0]!
       asked.push(q.question)
       const a = await new Promise<string | null>(r => { answer = r; opened() })
       if (a === null) return { deny: 'dismissed' }
@@ -2999,7 +2999,7 @@ describe('the Auto keepwarm option', () => {
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
-    expect(asked[0].question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Send it anyway\?$/)
+    expect(asked[0]!.question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Send it anyway\?$/)
   })
 
   test('off: a window armed by hand is promised until its deadline, and keeps pinging after a paid cold write', off, async ($, on) => {
@@ -3504,5 +3504,40 @@ describe('limiting ping spend during an idle break', () => {
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(2)
     expect(w.status.at(-1)).toMatch(/· ping in 50m · last ping read 20k \$0\.26/)
+  })
+})
+
+describe('display option', () => {
+  const armed = async ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') => {
+    await $.session.start({ ...session, surface, isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '90m'))
+  }
+
+  test('band (the default) draws the row above the prompt', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) test(`status moves the state to the ${surface} status entry and draws no row`, { options: { display: 'status' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($, surface)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBe(undefined)
+    expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+    expect(w.status.at(-1)).toBe('cache-tax · warm · keepwarm 1h30m left · ping in 50m')
+  })
+
+  test('off is not a choice: it falls back to the band, so running pings always show', { options: { display: 'off' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(w.status.every(text => text === undefined)).toBe(true)
   })
 })

@@ -35,6 +35,16 @@
       "description": "Limit each idle break's ping spend to the estimated rewrite cost divided by this number, including the next estimated ping. 2 by default; 0 disables the limit. The first ping has no receipt to estimate from.",
       "default": 2,
       "min": 0
+    },
+    "display": {
+      "title": "Display",
+      "description": "Where cache-tax shows its state. band: the row above the prompt (the default). status: the status entry under the prompt instead, with no row.",
+      "type": "string",
+      "options": [
+        "band",
+        "status"
+      ],
+      "default": "band"
     }
   },
   "types": "./types/index.d.ts"
