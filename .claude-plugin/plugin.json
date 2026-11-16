@@ -19,6 +19,13 @@
     "cost-visibility"
   ],
   "userConfig": {
+    "headless": {
+      "type": "string",
+      "title": "Headless prompts",
+      "description": "guard (default): keep the cold-send guard for CLI and SDK prompts. send: allow non-interactive SDK prompts without asking, unless guard refuse is explicit. Remote human prompts keep the guard.",
+      "default": "guard",
+      "options": ["guard", "send"]
+    },
     "autoWarm": {
       "type": "string",
       "title": "Auto keepwarm",
