@@ -2899,17 +2899,39 @@ describe('ask before a cold send', () => {
     expect(card.text).toMatch(/session     0 cold writes paid/)
   })
 
-  test('an unpriced model is asked with a bare Send anyway and no savings figure', async ($, on) => {
+  test('an unpriced model has no savings figure or idle spending limit in its messages', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [], { model: 'some-future-model' })
-    const asked = answering(on, 'Send anyway')
+    const asked = answering(on, null)
     await $.session.start(session)
     await $.turn.complete(turn({ usage: usage({ model: 'some-future-model' }) }))
     await clock.advance(3 * HOUR)
+    expect((await $.command.run(run('keepwarm', '1h'))).text).not.toMatch(/idle spending limit/)
+    const refused = await $.prompt.submit(prompt('hi'))
+    expect(refused.drop).toMatch(/keepwarm will be armed for up to 3h00m\./)
+    expect(refused.drop).not.toMatch(/idle spending limit/)
+    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
+    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Send it anyway\?$/)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
-    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
-    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Pings may stop sooner at the idle spending limit, leaving the cache to go cold\. Send it anyway\?$/)
+    await $.turn.complete(turn({ usage: usage({ model: 'some-future-model', cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 201k tokens paid (n/a). Keepwarm armed for up to 3h00m. /keepwarm off to stop.')
+    expect((await $.command.run(run('keepwarm', '1h'))).text).not.toMatch(/idle spending limit/)
+    expect((await $.command.run(run('keepwarm', 'always'))).text).not.toMatch(/idle spending limit/)
+  })
+
+  test('a disabled Ping floor keeps the uncapped guard and cold-write wording', { options: { pingFloor: 0 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, 'Send anyway ($4.01)')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    expect(asked[0]!.question).toMatch(/keepwarm holds the cache for 3h00m at about \$0\.05 a ping, so the next break does not cost \$4\.01 again\./)
+    expect(asked[0]!.question).not.toMatch(/idle spending limit/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 201k tokens paid ($4.01). Keeping the cache warm for 3h00m so it is not paid again today; /keepwarm off to stop.')
   })
 
   test("guard test with Don't send drops the prompt", async ($, on) => {
