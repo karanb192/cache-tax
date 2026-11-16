@@ -402,7 +402,7 @@ describe('guard', () => {
     // The refused send's process stored its ack; this one rebuilds the last request time a second later.
     const store = new Map<string, unknown>([['acked:S1', 8 * HOUR + 1000]])
     const w = world(on, [], { store })
-    await $.session.start(session)
+    await $.session.start({ ...session, isInteractive: false })
     await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
     const resend = await $.prompt.submit(prompt('hi'))
     expect(resend.drop).toBe(undefined)
@@ -1225,6 +1225,45 @@ describe('always after /clear', () => {
 })
 
 describe('guard by origin', () => {
+  for (const interactive of [false, true]) {
+    test(`an SDK host can answer the guard dialog (interactive ${interactive})`, { options: { headless: 'guard' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      const asked = answering(on, 'Send anyway ($4.01)')
+      await $.session.start({ ...session, isInteractive: interactive })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+      expect(asked.length).toBe(1)
+      expect(w.entered).toEqual(['hi'])
+    })
+  }
+
+  test('the send option still asks an interactive SDK-origin prompt', { options: { headless: 'send' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const asked = answering(on, null)
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/^cache-tax:/)
+    expect(asked.length).toBe(1)
+    expect(w.entered).toEqual([])
+  })
+
+  for (const persisted of [false, true]) {
+    test(`an explicit refuse at any price overrides send (persisted ${persisted})`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>(persisted ? [['guard', 'refuse']] : [])
+      const w = world(on, [], { store })
+      await $.session.start({ ...session, isInteractive: false })
+      if (!persisted) await $.command.run(run('cache-tax', 'guard refuse'))
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toMatch(/^cache-tax:/)
+      expect(w.entered).toEqual([])
+    })
+  }
   for (const headless of [undefined, 'guard', 'unknown']) {
     test(`headless ${String(headless)} preserves refusal and logs the reason`, { options: headless === undefined ? {} : { headless } }, async ($, on) => {
       const clock = mock.clock(on, { now: START })
@@ -3023,7 +3062,7 @@ describe('ask before a cold send', () => {
     const store = new Map<string, unknown>()
     world(on, [], { store })
     answering(on, null)
-    await $.session.start(session)
+    await $.session.start({ ...session, isInteractive: false })
     await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
     expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/Send it again to pay it/)
     expect(store.get('acked:S1')).toBe(8 * HOUR)

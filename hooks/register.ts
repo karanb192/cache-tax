@@ -649,6 +649,7 @@ export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
   const s = freshState()
   let headless = false
+  let explicitRefuse = false
   const sendHeadless = options.headless === 'send'
   let light = false
   let noColor = false
@@ -713,6 +714,7 @@ export const register: Register = (on, options) => {
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
     // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
     s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
+    explicitRefuse = savedGuard === 'refuse'
     const stored = alwaysWindow(await $.store.get(KEY_ALWAYS))
     s.always = stored > 0
     if (stored) s.alwaysMs = stored
@@ -826,6 +828,7 @@ export const register: Register = (on, options) => {
       const valid = words[1] === 'warn' ? !words[2] : words[1] === 'refuse' && words.length <= 3 && (!words[2] || (floor > 0 && Number.isFinite(floor)))
       if (!valid) return { text: '/cache-tax guard takes warn, refuse, refuse with a dollar floor such as refuse 5, or test' }
       s.guard = words[1] === 'warn' ? 'warn' : floor
+      explicitRefuse = words[1] === 'refuse' && floor === 0
       await $.store.set(KEY_GUARD, s.guard || 'refuse')
       return { text: s.guard === 'warn' ? 'guard set to warn: a cold send goes through with its price shown'
         : s.guard ? `guard set to ask at ${fmtUsd(s.guard)} or more: a cold send waits for ${SEND_LABEL} or ${KEEP_LABEL}, a cheaper one goes through with its price shown`
@@ -874,7 +877,7 @@ export const register: Register = (on, options) => {
     // A model with no price row has no estimate to compare, so the floor never lets it through.
     const usd = coldUsd(s)
     const guard = s.guard
-    const optedIn = headless && sendHeadless && e.origin.kind === 'sdk' && guard === 0
+    const optedIn = headless && sendHeadless && !explicitRefuse && e.origin.kind === 'sdk' && guard === 0
     const under = guard !== 'warn' && usd != null && usd < guard
     if (guard === 'warn' || unattended || under || optedIn) {
       const why = optedIn ? ', since Headless prompts is set to send' : unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
@@ -893,7 +896,7 @@ export const register: Register = (on, options) => {
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
     const sid = s.sid
     const send = sendLabel(s)
-    const answer = headless ? null : await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
+    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
     // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
     // answer belongs to the old one: nothing is sent, scored or stored under the new id.
     if (s.sid !== sid) return { drop: MOVED_TEXT }
