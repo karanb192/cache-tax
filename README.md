@@ -38,7 +38,8 @@ Built by [Karan Bansal](https://karanbansal.in/). Read [the Cache Tax story and 
 
 In `/config`, under cache-tax:
 
-    Auto keepwarm:  on | off
+    Auto keepwarm:   on | off
+    Headless prompts: guard | send
 
 `on` (the default) keeps today's behavior: after you pay a cold cache write, keepwarm arms itself for three hours. `off` leaves keepwarm alone until you arm it with `/keepwarm`; the guard's wording then says keepwarm stays off, or names the time left on a window you armed. `/keepwarm always` still arms it either way.
 
@@ -46,7 +47,11 @@ In `/config`, under cache-tax:
 
 **Before a break:** `/keepwarm` arms a bounded window. After 50 idle minutes, a timer inside Claude Code sends one tool-less fork over the session's transcript. It reads usage after every ping and stops if reads are zero or writes reach 10% of reads. There is no background transcript-polling loop.
 
-**When you return cold:** for a context of at least 50,000 tokens, the guard asks before your ordinary message goes out when its one-hour clock says cold. The question shows the estimated rewrite price and what not sending saves. **Send anyway** sends that same message; **Don't send** drops it with nothing paid. If the question is dismissed, or the host cannot show it, the guard drops the message once instead: resend to continue, or `/clear` and start from a note. With `/cache-tax guard refuse 5`, only an estimate of $5 or more is asked about, and so is a model with no price row; a cheaper one is sent with its price logged. Headless `claude -p` runs, including resumed runs, send the first cold prompt immediately and log the price, even with `guard refuse`. They can incur the cache-write cost because nobody can resend within the same process. A prompt no person sent, such as a background task's notification, a scheduled prompt or another session's message, is also sent with the price logged. Outside headless runs, anything a person may have sent keeps the guard, including Remote Control, Slack and channel messages, SDK hosts and prompts Claude Code cannot classify.
+**When you return cold:** for a context of at least 50,000 tokens, the guard asks before your ordinary message goes out when its one-hour clock says cold. **Send anyway** sends that message; **Don't send** drops it. If the dialog is dismissed, or the session is non-interactive, the guard refuses once and the resend goes through. `/cache-tax guard refuse 5` asks at $5 or more, including a model with no price row; cheaper sends log their price and proceed.
+
+`Headless prompts: send` opts non-interactive `sdk`-origin prompts into sending immediately at the default guard setting. Claude Code uses those same fields for both `claude -p` and Agent SDK turns, so the option covers both; it cannot distinguish the CLI from an SDK host. The default, `guard`, preserves refusal. An explicit dollar floor still applies with `send`. Remote human messages (`composer`, `bridge`, `unclassified` and channel origins) keep the guard, even in a non-interactive host. Background notifications and scheduled prompts retain their existing send-through behavior.
+
+A headless refusal returns its reason and logs it to the transcript/debug log. Use Claude Code's `--debug-file` when diagnosing a script: the mod API has no stderr sink or exit-code control for a prompt refusal, so this change does not promise a nonzero process exit or a reason on stdout. An opted-in run that hits a dollar floor must still be retried deliberately.
 
 By default, a detected cold write automatically arms at least three hours of keepwarm, the always window (six hours unless you set another) with `always` on, and prints what it cost; the Auto keepwarm [option](#options) turns the automatic part off. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
 
@@ -86,7 +91,7 @@ The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath 
 
     cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?
 
-Outside headless runs, when the question is dismissed or the host cannot show it, the refusal appears instead, and the resend goes through:
+When the question is dismissed or a guarded headless run cannot show it, the refusal appears instead, and the resend goes through:
 
     cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Send it again to pay it, and keepwarm will then hold the cache for 3h00m. Or /clear and start from a note.
 
@@ -119,7 +124,7 @@ Reach L2, drives Claude. Sees every prompt you type, every model request's timin
 The same scan is on [cache-tax's page in Awesome Claude Code Mods](https://mods.aidojo.si/mods/karanb192--cache-tax--cache-tax/), which records what thousands of other mods can reach.
 
     Threat model for cache-tax (reach L2, drives Claude)
-    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list; the session id, the session's model and the engine's own context figure and start time, once per conversation the process runs, and the model again before pricing a cold send; the reason and session id of a conversation ending under /clear or an in-process resume; each main request's message count; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch (and its window) and guard mode with its dollar floor; at load, its Auto keepwarm option
+    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list; the session id, the session's model and the engine's own context figure and start time, once per conversation the process runs, and the model again before pricing a cold send; the reason and session id of a conversation ending under /clear or an in-process resume; each main request's message count; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch (and its window) and guard mode with its dollar floor; at load, its Auto keepwarm and Headless prompts options; whether the session starts interactive
     2. Runs:     one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read; one question in Claude Code's own dialog before a cold send goes out, or on the next prompt after /cache-tax guard test
     3. Sends:    nothing leaves the machine except the fork, an API request over the session's own transcript with a fixed one-line prompt
     4. Persists: in $.store, the keepwarm deadline and the ping period under this session's id (with always on, rewritten after each turn), and the always switch (true, or its window in milliseconds) and the guard mode (a dollar floor is stored in its place) for every session; after a refusal, the time of the last response under this session's id, so a resend from a new process (claude -p starts one per turn) goes through, deleted by that resend or /clear; a window that has ended is deleted at stop and at this session's next start, together with the bare keys of a 2.1.0 store; another session's keys are never deleted here, because a read followed by a delete cannot be made atomic against that session renewing its window, so a session that armed keepwarm and never came back leaves two small keys behind; the session's cold-write tally lives in memory and dies with the session
@@ -169,7 +174,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [250 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [261 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Guard:** the Send anyway / Don't send question, its dismissed fallback and the guard test, refuse once and resend, including from a new process and after an API error with no response, warn mode, a dollar floor (under it, at it, an unpriced model, a model switched since the last turn), slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.

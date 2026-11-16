@@ -19,6 +19,13 @@
     "cost-visibility"
   ],
   "userConfig": {
+    "headless": {
+      "type": "string",
+      "title": "Headless prompts",
+      "description": "guard (default): refuse a cold CLI or SDK prompt once. send: allow it without a retry, unless an explicit dollar refusal floor applies. Remote human prompts keep the guard.",
+      "default": "guard",
+      "options": ["guard", "send"]
+    },
     "autoWarm": {
       "type": "string",
       "title": "Auto keepwarm",

@@ -649,6 +649,7 @@ export const register: Register = (on, options) => {
   autoWarm = autoWarmFrom(options)
   const s = freshState()
   let headless = false
+  const sendHeadless = options.headless === 'send'
   let light = false
   let noColor = false
 
@@ -869,14 +870,14 @@ export const register: Register = (on, options) => {
     const model = await $.session.model()
     if (model) s.lastModel = model
     tellUnpriced($, s)
-    // Headless runs and prompts no person sent have nobody to send them again.
-    const unattended = headless || UNATTENDED.has(e.origin.kind)
+    const unattended = UNATTENDED.has(e.origin.kind)
     // A model with no price row has no estimate to compare, so the floor never lets it through.
     const usd = coldUsd(s)
     const guard = s.guard
+    const optedIn = headless && sendHeadless && e.origin.kind === 'sdk' && guard === 0
     const under = guard !== 'warn' && usd != null && usd < guard
-    if (guard === 'warn' || unattended || under) {
-      const why = unattended ? `, since this ${headless ? 'headless' : e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
+    if (guard === 'warn' || unattended || under || optedIn) {
+      const why = optedIn ? ', since Headless prompts is set to send' : unattended ? `, since this ${e.origin.kind} prompt cannot be sent again` : under ? `, since it is under your ${fmtUsd(guard)} floor` : ''
       $.ui.log(`${guardText(s, now)} Sending anyway${why}; ${holdNote(s, now, false)}.`)
       s.coldWritePending = true
       return next(e)
@@ -892,7 +893,7 @@ export const register: Register = (on, options) => {
     // Ask before the turn starts: the button lets this very prompt through, still the user's own.
     const sid = s.sid
     const send = sendLabel(s)
-    const answer = await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
+    const answer = headless ? null : await ask($, `cache-tax: ${guardText(s, now)} ${saveText(s, now)} Send it anyway?`, send)
     // A person can take minutes to answer. If /clear or a resume moved the process to another conversation meanwhile, the
     // answer belongs to the old one: nothing is sent, scored or stored under the new id.
     if (s.sid !== sid) return { drop: MOVED_TEXT }
@@ -904,7 +905,9 @@ export const register: Register = (on, options) => {
     // No dialog to answer (dismissed, or a run with no one to ask): refuse once, the resend pays.
     s.ackedAt = s.lastRequestAt
     if (s.lastResponseAt) await $.store.set(ackedKey(s), s.lastResponseAt)
-    return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and ${holdNote(s, now, true)}. Or /clear and start from a note.` }
+    const reason = `cache-tax: ${guardText(s, now)} Send it again to pay it, and ${holdNote(s, now, true)}. Or /clear and start from a note.`
+    if (headless) $.ui.log(reason)
+    return { drop: reason }
   })
 
   on('turn.step', async function* ($, e, next) {

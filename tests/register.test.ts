@@ -93,7 +93,7 @@ const nothing: ForkAnswer = { isAnswered: false, reason: 'nothing-to-fork' }
 const busy: ForkAnswer = { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: usage() }
 
 const bandProps: RenderPropsOf['AbovePrompt'] = {
-  hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 75,
+  hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 75,
   scroll: { offset: 0, bodyRows: 10 }, view: {},
 }
 
@@ -1225,16 +1225,67 @@ describe('always after /clear', () => {
 })
 
 describe('guard by origin', () => {
-  test('a cold headless typed prompt is sent and scored', async ($, on) => {
+  for (const headless of [undefined, 'guard', 'unknown']) {
+    test(`headless ${String(headless)} preserves refusal and logs the reason`, { options: headless === undefined ? {} : { headless } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+      expect(r.drop).toMatch(/cache-tax: the prompt cache went cold/)
+      expect(w.logs.at(-1)).toBe(r.drop)
+      expect(w.entered).toEqual([])
+    })
+  }
+
+  for (const kind of ['composer', 'bridge', 'unclassified'] as const) {
+    test(`headless send keeps ${kind} prompts guarded`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind } })).drop).toMatch(/^cache-tax:/)
+      expect(w.entered).toEqual([])
+    })
+  }
+
+  for (const [floor, model, refused] of [[4, 'claude-fable-5-1', true], [5, 'claude-fable-5-1', false], [5, 'unknown', true]] as const) {
+    test(`headless send honors floor ${floor} on ${model}`, { options: { headless: 'send' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [], { model })
+      await $.session.start({ ...session, isInteractive: false })
+      await $.turn.complete(turn({ usage: usage({ model }) }))
+      await $.command.run(run('cache-tax', `guard refuse ${floor}`))
+      await clock.advance(3 * HOUR)
+      const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
+      expect(Boolean(r.drop)).toBe(refused)
+      expect(w.entered.length).toBe(refused ? 0 : 1)
+    })
+  }
+
+  test('an opted-in headless run keeps the stored refusal resend path', { options: { headless: 'send' } }, async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    const store = new Map<string, unknown>([['guard', 4], ['acked:S1', 8 * HOUR]])
+    const w = world(on, [], { store })
+    await $.session.start({ ...session, isInteractive: false })
+    await $.classic.SessionStart({ session_id: 'S1', source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000 })
+    expect((await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.has('acked:S1')).toBe(false)
+  })
+
+  test('an opted-in cold headless SDK prompt is sent and scored', { options: { headless: 'send' } }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [])
     await $.session.start({ ...session, isInteractive: false })
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
-    const r = await $.prompt.submit(prompt('hi'))
+    const r = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'sdk' } })
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
-    expect(w.logs.at(-1)).toMatch(/Sending anyway, since this headless prompt cannot be sent again/)
+    expect(w.logs.at(-1)).toMatch(/Sending anyway, since Headless prompts is set to send/)
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid/)
   })
