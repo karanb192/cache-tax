@@ -44,7 +44,7 @@
           <div>
             <h2>Before your break</h2>
             <p>Run <code>/keepwarm 90m</code> for a 90-minute window. After 50 idle minutes, Cache Tax sends a model request over the session to refresh its cache.</p>
-            <p>Each ping checks its usage. No cache reads, or writes reaching 10% of reads, stop the loop. <code>/keepwarm off</code> stops it too. An already-cold session waits for your next turn before pinging.</p>
+            <p>Each ping checks its usage. No cache reads, or writes reaching 10% of reads, stop the loop. The idle spending limit can skip further pings before the window ends, leaving the cache to go cold. <code>/keepwarm off</code> stops it too. An already-cold session waits for your next turn before pinging.</p>
           </div>
           <div>
             <h2>When you return cold</h2>

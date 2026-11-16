@@ -49,7 +49,7 @@ The first ping has no receipt, so it goes out. A later answer can cost more than
 
 ## How it works
 
-**Before a break:** `/keepwarm` arms a bounded window. After 50 idle minutes, a timer inside Claude Code sends one tool-less fork over the session's transcript. It reads usage after every ping and stops if reads are zero or writes reach 10% of reads. There is no background transcript-polling loop.
+**Before a break:** `/keepwarm` arms a bounded window. After 50 idle minutes, a timer inside Claude Code sends one tool-less fork over the session's transcript. It reads usage after every ping and stops if reads are zero or writes reach 10% of reads. The idle spending limit can skip later pings before the window ends. There is no background transcript-polling loop.
 
 **When you return cold:** for a context of at least 50,000 tokens, the guard asks before your ordinary message goes out when its one-hour clock says cold. The question shows the estimated rewrite price and what not sending saves. **Send anyway** sends that same message; **Don't send** drops it with nothing paid. If the question is dismissed, or nobody can answer it (a `-p` run), the guard drops the message once instead: resend to continue, or `/clear` and start from a note. With `/cache-tax guard refuse 5`, only an estimate of $5 or more is asked about, and so is a model with no price row; a cheaper one is sent with its price logged. A prompt no person sent, such as a background task's notification, a scheduled prompt or another session's message, is sent with the price logged, because nobody is there to resend it. Anything a person may have sent keeps the guard, including Remote Control, Slack and channel messages, SDK hosts and prompts Claude Code cannot classify.
 
@@ -89,11 +89,11 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
 
 The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath it:
 
-    cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm holds the cache for 3h00m at about $0.05 a ping, so the next break does not cost $4.01 again. Send it anyway?
+    cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?
 
 When the question is dismissed or nobody can answer it, the refusal instead, and the resend goes through:
 
-    cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Send it again to pay it, and keepwarm will then hold the cache for 3h00m. Or /clear and start from a note.
+    cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Send it again to pay it, and keepwarm will be armed for up to 3h00m, but may stop sooner at the idle spending limit. Or /clear and start from a note.
 
 The figure is an upper bound. The context count the engine reports for a resumed session is the last response's input, cache read, cache write and output together, and the resume payload carries no separate output count to take off; on one 15-day-old session the guard said 330,316 tokens and $6.61 and the write that followed was 314k tokens, $6.28.
 
@@ -174,7 +174,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [268 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [270 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.
@@ -201,7 +201,7 @@ Generated declarations live in `.claude-plugin/types/`. Keep them untracked.
 
 ## Reading the state from another mod
 
-cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It is experimental until 3.0: fields may change in a minor release. `cold` is the same one-hour estimate `/cache-tax` shows, not a check of the server's cache. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.
+cache-tax adds a read-only `$.cacheTax.status()` to the mods API, so a status band can show keepwarm without parsing `/cache-tax`. It is experimental until 3.0: fields may change in a minor release. `cold` is the same one-hour estimate `/cache-tax` shows, not a check of the server's cache. It resolves to `{ keepwarm: 'on' | 'off' | 'stopped', leftMs, always, alwaysMs, autoWarm, guard, guardFloorUsd, cold, stopped, coldWrites, pingSkipped, idlePingUsd }`; the types are in `types/index.d.ts`. Where cache-tax is not installed there is no `$.cacheTax`, so a caller wraps the call in `try`/`catch`.
 
 ## More Claude Code mods
 

@@ -2695,7 +2695,7 @@ describe('ask before a cold send', () => {
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
-    expect(asked[0].question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
+    expect(asked[0].question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
     expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
@@ -2755,7 +2755,7 @@ describe('ask before a cold send', () => {
     await $.turn.complete(turn())
     await $.prompt.submit(prompt('two'))
     expect(w.entered).toEqual(['one', 'two'])
-    expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`])
+    expect(asked.map(a => a.question)).toEqual([`cache-tax test, as if the cache were cold: Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`])
     expect(asked[0].options).toEqual(['Send anyway ($4.01)', "Don't send"])
     const card = await $.command.run(run('cache-tax', 'status'))
     expect(card.text).toMatch(/session     0 cold writes paid/)
@@ -3175,7 +3175,7 @@ describe('$.cacheTax noun', () => {
   })
 })
 
-describe('skipping a ping that costs more than the rewrite it saves', () => {
+describe('limiting ping spend during an idle break', () => {
   // 20k of context re-writes for $0.40 on Fable 5.1. A ping that reads it and thinks 5,000 tokens costs $0.26, and twice
   // that is more than the rewrite; one that answers in a token costs half a cent.
   const small = { live: { tokens: 20000 } }
@@ -3194,6 +3194,8 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     const before = JSON.parse((await $.command.run(peekCmd)).text!)
     expect(before.pingSkipped).toBe(true)
     expect(Math.abs(before.idlePingUsd - 19 * 0.040028) < 1e-6).toBe(true)
+    await $.turn.complete(turn({ usage: undefined, reason: 'error', isAborted: true }))
+    expect(JSON.parse((await $.command.run(peekCmd)).text!).pingSkipped).toBe(true)
     await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
     const reset = JSON.parse((await $.command.run(peekCmd)).text!)
     expect(reset).toMatchObject({ pingSkipped: false, idlePingUsd: 0 })
@@ -3213,6 +3215,40 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(w.forks.length).toBe(3)
     expect(skipped(w.logs)).toEqual([])
   })
+
+  for (const action of ['stop', 'turn'] as const) {
+    test(`a billed ping finishing after ${action} is charged only to its own break`, { plugins: [peek] }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let calls = 0
+      let release = () => {}
+      let opened = () => {}
+      const waiting = new Promise<void>(resolve => { opened = resolve })
+      const w = world(on, [cheap, dear, cheap], { ...small, gate: async () => {
+        if (++calls === 2) await new Promise<void>(resolve => { release = resolve; opened() })
+      } })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '6h'))
+      await clock.advance(50 * MIN)
+      const advance = clock.advance(50 * MIN)
+      await waiting
+      if (action === 'stop') await $.command.run(run('keepwarm', 'off'))
+      else await $.turn.complete(turn())
+      release()
+      await advance
+      const status = JSON.parse((await $.command.run(peekCmd)).text!)
+      if (action === 'stop') {
+        expect(status.idlePingUsd > 0.26).toBe(true)
+        await $.command.run(run('keepwarm', '6h'))
+        expect(JSON.parse((await $.command.run(peekCmd)).text!).idlePingUsd > 0.26).toBe(true)
+        expect(w.forks.length).toBe(2)
+      } else {
+        expect(status.idlePingUsd).toBe(0)
+        await clock.advance(50 * MIN)
+        expect(w.forks.length).toBe(3)
+      }
+    })
+  }
 
   test('a failed ping with reported usage still consumes the idle budget', async ($, on) => {
     const clock = mock.clock(on, { now: START })
@@ -3286,7 +3322,7 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(pingFloorFrom({ pingFloor: '3' })).toBe(2)
   })
 
-  test('skips the ping when the rewrite is under twice the last ping, says why, and lets the cache go cold', async ($, on) => {
+  test('skips at the budget, says why, and lets the cache go cold', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [dear, dear], small)
     await $.session.start(session)
@@ -3306,7 +3342,7 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(w.forks.length).toBe(1)
   })
 
-  test('pings when the rewrite is over twice the last ping', async ($, on) => {
+  test('pings while spend including the next estimate stays within budget', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [cheap, cheap, cheap], small)
     await $.session.start(session)
@@ -3336,7 +3372,7 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
     expect(skipped(w.logs).length).toBe(1)
   })
 
-  test('the Ping floor option sets the multiple', { options: { pingFloor: 100 } }, async ($, on) => {
+  test('the Ping floor option divides the rewrite into a budget', { options: { pingFloor: 100 } }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [cheap, cheap], small)
     await $.session.start(session)
