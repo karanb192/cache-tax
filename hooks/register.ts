@@ -117,7 +117,6 @@ export type State = {
   idleGen: number
   /** This break reached its budget; the window waits for the cold mark or the next turn. */
   skipping: boolean
-  /** The skip was said in this window; said again only after a ping goes out, the window stops or the conversation ends. */
   skipSaid: boolean
   stopped: string | null
   /** `/cache-tax guard test`: the next prompt a person sends asks as if the cache were cold. The test itself scores nothing. */
