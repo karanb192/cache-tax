@@ -3340,6 +3340,10 @@ describe('limiting ping spend during an idle break', () => {
     expect(w.status.at(-1)).toMatch(/· cold now, first ping 50m after the next turn/)
     await clock.advance(3 * HOUR)
     expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(skipped(w.logs).length).toBe(2)
   })
 
   test('pings while spend including the next estimate stays within budget', async ($, on) => {
@@ -3353,7 +3357,7 @@ describe('limiting ping spend during an idle break', () => {
     expect(skipped(w.logs)).toEqual([])
   })
 
-  test('says the reason once, not on every skipped tick', async ($, on) => {
+  test('says the reason once per idle break', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [dear, dear, dear], small)
     await $.session.start(session)
@@ -3361,7 +3365,7 @@ describe('limiting ping spend during an idle break', () => {
     await $.command.run(run('keepwarm', '6h'))
     await clock.advance(100 * MIN)
     expect(skipped(w.logs).length).toBe(1)
-    // Each turn opens a new idle stretch, checked again against the same receipt: skipped, and not said again.
+    // Each turn starts another budget, even when its first ping is already too expensive.
     for (let i = 0; i < 2; i++) {
       await clock.advance(5 * MIN)
       await $.turn.complete(turn())
@@ -3369,7 +3373,7 @@ describe('limiting ping spend during an idle break', () => {
       expect(w.status.at(-1)).toMatch(/· ping skipped/)
     }
     expect(w.forks.length).toBe(1)
-    expect(skipped(w.logs).length).toBe(1)
+    expect(skipped(w.logs).length).toBe(3)
   })
 
   test('the Ping floor option divides the rewrite into a budget', { options: { pingFloor: 100 } }, async ($, on) => {

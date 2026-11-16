@@ -1026,11 +1026,12 @@ export const register: Register = (on, options) => {
     s.waitForTurn = false
     if (e.usage || (!e.isAborted && e.reason !== 'error')) {
       s.skipping = false
+      s.skipSaid = false
       s.idleSpentUsd = 0
       s.idleGen++
     }
     s.ackedAt = 0
-    // Always covers any break up to its window (six hours unless /keepwarm always <window> set another) after a turn
+    // Always covers a break within the idle budget and its window (six hours unless set otherwise) after a turn
     // that reached the cache (a turn that failed before any response touched nothing, and its cache may be cold): a
     // window of at least that length at the default period, which brings back a stopped window and replaces a shorter
     // one or a testing period. Another session's /keepwarm off or /keepwarm always changes the shared switch and its
