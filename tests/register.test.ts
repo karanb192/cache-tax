@@ -1,5 +1,5 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
-import type { Plugin, TestBody } from 'claude-code/testing'
+import type { Engine, Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
@@ -3172,5 +3172,40 @@ describe('$.cacheTax noun', () => {
     expect(await read()).toMatchObject({ always: true, alwaysMs: 24 * HOUR, guard: 'refuse', guardFloorUsd: 5 })
     await $.command.run(run('cache-tax', 'guard warn'))
     expect(await read()).toMatchObject({ guard: 'warn', guardFloorUsd: null })
+  })
+})
+
+describe('display option', () => {
+  const armed = async ($: Engine, surface: 'terminal' | 'desktop' = 'terminal') => {
+    await $.session.start({ ...session, surface, isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '90m'))
+  }
+
+  test('band (the default) draws the row above the prompt', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) test(`status moves the state to the ${surface} status entry and draws no row`, { options: { display: 'status' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($, surface)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBe(undefined)
+    expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+    expect(w.status.at(-1)).toBe('cache-tax · warm · keepwarm 1h30m left · ping in 50m')
+  })
+
+  test('off is not a choice: it falls back to the band, so running pings always show', { options: { display: 'off' } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [])
+    await armed($)
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(w.status.every(text => text === undefined)).toBe(true)
   })
 })
