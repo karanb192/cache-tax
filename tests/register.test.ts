@@ -3216,7 +3216,7 @@ describe('skipping a ping that costs more than the rewrite it saves', () => {
 
   test('a failed ping with reported usage still consumes the idle budget', async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const failed: ForkAnswer = { isAnswered: false, reason: 'api-error', status: 429, error: 'busy', usage: usage({ cache_read_input_tokens: 20000, cache_creation_input_tokens: 0, output_tokens: 5000 }) }
+    const failed: ForkAnswer = { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: usage({ cache_read_input_tokens: 20000, cache_creation_input_tokens: 0, output_tokens: 5000 }) }
     const w = world(on, [cheap, failed, cheap], small)
     await $.session.start(session)
     await $.turn.complete(turn())
