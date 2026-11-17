@@ -2930,9 +2930,36 @@ describe('ask before a cold send', () => {
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
     await clock.advance(1)
+    // Still trying: a refusal while the held prompt's turn closes is retried for a few seconds.
+    expect(w.filled).toEqual([])
+    await clock.advance(10_000)
     expect(w.entered).toEqual([])
     expect(w.filled).toEqual(['hi'])
-    expect(w.logs.at(-1)).toBe('the compaction did not run, so your message was not sent and is back in the prompt box. Run /compact yourself, then send it.')
+    // The reason is the engine's own, in brackets.
+    expect(w.logs.at(-1)).toMatch(/^the compaction did not run \(.+\), so your message was not sent and is back in the prompt box\. Run \/compact yourself, then send it\.$/)
+  })
+
+  test('Compact, then send retries a compaction refused while the turn is still closing, then sends', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let calls = 0
+    const w = world(on, [], {
+      compact: e => {
+        if (++calls === 1) throw new Error('a turn is running')
+        return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensBefore: 200_502, tokensAfter: 9_000 } as SessionCompactResult
+      },
+    })
+    answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe('cache-tax: compacting first. Your message is sent when the summary is ready.')
+    await clock.advance(1)
+    expect(calls).toBe(1)
+    await clock.advance(250)
+    expect(calls).toBe(2)
+    expect(w.filled).toEqual([])
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/^compacted before sending/)
   })
 
   test('a /clear while the compaction runs sends nothing and resets nothing in the new conversation', async ($, on) => {
@@ -3045,8 +3072,11 @@ describe('ask before a cold send', () => {
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
     await clock.advance(1)
+    expect(w.filled).toEqual([])
+    await clock.advance(10_000)
     expect(w.entered).toEqual([])
     expect(w.filled).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/^the clear did not run \(.+\), so your message was not sent/)
   })
 
   test('a second prompt typed while the clear runs is dropped, not asked about', async ($, on) => {

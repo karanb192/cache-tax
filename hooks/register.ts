@@ -270,18 +270,42 @@ async function giveBack($: EngineInterface, text: string): Promise<string> {
 }
 
 /** Runs the compaction the person picked, outside the hook that asked, then sends the held prompt. Nothing is sent after a /clear, a resume, a skip or a failure. */
+/** Waits before a retry; the engine's clock, so tests advance it. */
+function pause($: EngineInterface, ms: number): Promise<void> {
+  return new Promise(resolve => { $.clock.after(ms, resolve) })
+}
+
+/** Gaps between attempts at a call the engine refuses while the turn the held prompt opened is still closing. */
+const BUSY_RETRY_MS = [250, 500, 1000, 2000, 4000]
+
+/** The engine's reason for a refusal, for the line that says it did not run. */
+function why(err: unknown): string {
+  const m = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+  return m ? ` (${m.slice(0, 120)})` : ''
+}
+
 async function compactThenSend($: EngineInterface, s: State, sid: string, mine: number, text: string) {
   let done: Awaited<ReturnType<EngineInterface['session']['compact']>> | null = null
-  try {
-    // The same call /compact makes. It rejects while a turn runs and on an engine without it.
-    done = await $.session.compact()
-  } catch { /* told below */ }
+  let err: unknown
+  // The same call /compact makes. It rejects while a turn runs, and the turn the dropped prompt opened can still be
+  // closing when the timer fires (seen in the desktop app), so a refusal is tried again for a few seconds.
+  for (let i = 0; ; i++) {
+    try {
+      done = await $.session.compact()
+      break
+    } catch (e) {
+      err = e
+    }
+    if (i >= BUSY_RETRY_MS.length) break
+    await pause($, BUSY_RETRY_MS[i]!)
+    if (s.compacting !== mine || s.sid !== sid) return
+  }
   // The summary is a model request and can take a minute; a /clear or a resume in the middle moved the conversation.
   if (s.compacting !== mine || s.sid !== sid) return
   if (!done || done.skip !== undefined) {
     s.compacting = 0
     const back = await giveBack($, text)
-    $.ui.log(done ? `the compaction was skipped (${done.skip}), so your message was not sent${back}.` : `the compaction did not run, so your message was not sent${back}. Run /compact yourself, then send it.`)
+    $.ui.log(done ? `the compaction was skipped (${done.skip}), so your message was not sent${back}.` : `the compaction did not run${why(err)}, so your message was not sent${back}. Run /compact yourself, then send it.`)
     return
   }
   // Reset as the session.compact hook resets it, in case the engine did not run that hook for the mod's own call:
@@ -302,18 +326,27 @@ async function compactThenSend($: EngineInterface, s: State, sid: string, mine: 
 
 /** Runs the /clear the person picked, outside the hook that asked, then sends the held prompt into the new conversation. */
 async function clearThenSend($: EngineInterface, s: State, mine: number, text: string) {
-  let ran = true
-  try {
-    // The same call as typing /clear. It rejects inside a hook a turn waits on, which is why this runs from a timer.
-    await $.command.run({ command: 'clear' })
-  } catch {
-    ran = false
+  let ran = false
+  let err: unknown
+  // The same call as typing /clear. It rejects inside a hook a turn waits on, which is why this runs from a timer,
+  // and while that turn is still closing, which is why a refusal is tried again for a few seconds.
+  for (let i = 0; ; i++) {
+    try {
+      await $.command.run({ command: 'clear' })
+      ran = true
+      break
+    } catch (e) {
+      err = e
+    }
+    if (i >= BUSY_RETRY_MS.length) break
+    await pause($, BUSY_RETRY_MS[i]!)
+    if (s.clearing !== mine) return
   }
   if (s.clearing !== mine) return
   s.clearing = 0
   // /clear resets this state through the session's end or its restart. A context still counted here means it never ran.
   if (!ran || s.ctx >= BIG_TOKENS) {
-    $.ui.log(`the clear did not run, so your message was not sent${await giveBack($, text)}. Run /clear yourself, then send it.`)
+    $.ui.log(`the clear did not run${ran ? '' : why(err)}, so your message was not sent${await giveBack($, text)}. Run /clear yourself, then send it.`)
     return
   }
   $.ui.log('cleared before sending: this is a new conversation, so nothing was rewritten.')
