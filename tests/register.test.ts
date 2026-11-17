@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; usageGate?: () => Promise<void>; stepGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -59,12 +59,13 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: typeof opts.sid === 'function' ? opts.sid() : opts.sid ?? 'S1' }))
   on('session.model', async () => { await opts.modelGate?.(); return { value: (typeof opts.model === 'function' ? opts.model() : opts.model) ?? 'claude-fable-5-1' } })
-  on('session.usage', () => ({ value: { startedAt: opts.startedAt?.() ?? START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: [] } }))
+  on('session.usage', async () => { await opts.usageGate?.(); return { value: { startedAt: opts.startedAt?.() ?? START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: [] } } })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('turn.step', async function* ($, e) {
     const u = opts.steps?.shift() ?? null
+    await opts.stepGate?.()
     yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: u }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: u }
   })
@@ -1566,6 +1567,154 @@ describe('price edge cases', () => {
   })
 })
 
+describe('cold-write receipt evidence', () => {
+  const step = async ($: Parameters<TestBody>[0], index: number) => {
+    for await (const c of $.turn.step({ turnId: 'comeback', index, model: 'claude-fable-5-1', messageCount: 4 })) void c
+  }
+
+  for (const perRequest of [false, true]) {
+    for (const written of [500, 60000, 200000]) {
+      test(`${perRequest ? 'per-request' : 'aggregate'}: a guarded resend reading the prefix does not score ${written} new tokens`, async ($, on) => {
+        const clock = mock.clock(on, { now: START })
+        const receipt = usage({ cache_creation_input_tokens: written })
+        const store = new Map<string, unknown>()
+        const w = world(on, [warm], { store, steps: perRequest ? [receipt] : [] })
+        await $.session.start(session)
+        await $.turn.complete(turn())
+        await clock.advance(3 * HOUR)
+        expect((await $.prompt.submit(prompt('continue'))).drop).toMatch(/Send it again/)
+        expect((await $.prompt.submit(prompt('continue'))).drop).toBe(undefined)
+        if (perRequest) await step($, 0)
+        await $.turn.complete(turn({ usage: receipt }))
+        expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+        expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+        expect(store.has('deadline:S1')).toBe(false)
+        expect(w.logs).toEqual([])
+        await clock.advance(50 * MIN)
+        expect(w.forks.length).toBe(0)
+      })
+    }
+
+    test(`${perRequest ? 'per-request' : 'aggregate'}: a partial rewrite counts only the uncached prior context`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const receipt = usage({ cache_read_input_tokens: 160000, cache_creation_input_tokens: 60000 })
+      const w = world(on, [], { live: { tokens: 200000 }, steps: perRequest ? [receipt] : [] })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      await $.prompt.submit(prompt('continue'))
+      await $.prompt.submit(prompt('continue'))
+      if (perRequest) await step($, 0)
+      await $.turn.complete(turn({ usage: receipt }))
+      expect(w.logs.at(-1)).toMatch(/^cold write of 40k tokens paid \(\$0\.80\)/)
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid/)
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/^keepwarm 3h00m left/)
+    })
+  }
+
+  test('an unguarded full cache hit with a large paste is not a rewrite', async ($, on) => {
+    mock.clock(on, { now: START })
+    const receipt = usage({ cache_creation_input_tokens: 200000 })
+    const w = world(on, [], { steps: [receipt] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await step($, 0)
+    await $.turn.complete(turn({ usage: receipt }))
+    expect(w.logs).toEqual([])
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+  })
+
+  test('later cache reads cannot hide the first request rewriting the prefix', async ($, on) => {
+    mock.clock(on, { now: START })
+    const cold = usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 220000 })
+    const w = world(on, [], { live: { tokens: 200000 }, steps: [cold, usage({ cache_creation_input_tokens: 60000 })] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await step($, 0)
+    await step($, 1)
+    await $.turn.complete(turn({ usage: usage({ cache_creation_input_tokens: 280000 }) }))
+    expect(w.logs.at(-1)).toMatch(/^cold write of 200k tokens paid \(\$4\.00\)/)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid/)
+  })
+
+  test('each rewrite uses its own model and prompt tier, and a warm unpriced step adds nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const first = usage({ model: 'claude-haiku-5-5', cache_read_input_tokens: 0, cache_creation_input_tokens: 99000 })
+    const second = usage({ model: 'claude-haiku-5-5', cache_read_input_tokens: 50000, cache_creation_input_tokens: 60000 })
+    const w = world(on, [], { live: { tokens: 99000 }, steps: [first, second, usage({ model: 'unpriced' })] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(2 * HOUR)
+    await step($, 0)
+    await step($, 1)
+    await step($, 2)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 250000, cache_creation_input_tokens: 159500 }) }))
+    // 99k at $0.20/MTok, then 49k at $1/MTok. The rest is new content.
+    expect(w.logs.at(-1)).toMatch(/^cold write of 148k tokens paid \(\$0\.07\)/)
+  })
+
+  test('a rewrite without a price row is not repriced using the final model', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on, [], { steps: [usage({ model: 'unpriced', cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await step($, 0)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect(w.logs.at(-1)).toMatch(/^cold write of 200k tokens paid \(n\/a\)/)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/1 cold write paid, no price row/)
+  })
+
+  test('a step completing after clear cannot add its receipt to the next conversation', async ($, on) => {
+    mock.clock(on, { now: START })
+    let sid = 'S1'
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [], { sid: () => sid, steps: [usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })], stepGate: async () => {
+      await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const pending = step($, 0)
+    await held
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.command.run(run('keepwarm', 'status'))
+    await $.turn.complete(turn())
+    release()
+    await pending
+    await $.turn.complete(turn())
+    expect(w.logs).toEqual([])
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+  })
+
+  test('clear during the context read drops the old completion and its automatic window', async ($, on) => {
+    mock.clock(on, { now: START })
+    let hold = false
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [], { usageGate: async () => {
+      if (hold) {
+        hold = false
+        await new Promise<void>(resolve => { release = resolve; opened() })
+      }
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    hold = true
+    const pending = $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    await held
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    release()
+    await pending
+    expect(w.logs).toEqual([])
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/context     0 tokens/)
+  })
+})
+
 describe('per-request pricing and window extension', () => {
   const settle = () => new Promise<void>(r => { (globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(r, 20) })
   const haiku = (read: number, write: number) => usage({ model: 'claude-haiku-5-5', cache_read_input_tokens: read, cache_creation_input_tokens: write })
@@ -1599,7 +1748,7 @@ describe('per-request pricing and window extension', () => {
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
   })
 
-  test('a Haiku 5.5 turn whose requests straddle 100k prices each write at its own tier', async ($, on) => {
+  test('a Haiku 5.5 comeback does not count later new content at the long tier as a rewrite', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     world(on, [], { steps: [haiku(0, 99000), haiku(99000, 60000)] })
     await $.session.start(session)
@@ -1608,9 +1757,9 @@ describe('per-request pricing and window extension', () => {
     await clock.advance(2 * HOUR)
     await step($, 0)
     await step($, 1)
-    // 99,000 at $0.20 plus 60,000 at $1, against $0.16 for all at $1 or $0.03 for all at $0.20.
+    // The 99k rewrite costs $0.0198. The later 60k is new content beside a full cache hit.
     await $.turn.complete(turn({ usage: haiku(99000, 159000) }))
-    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid, \$0\.08/)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     1 cold write paid, \$0\.02/)
   })
 
   test('a ping out when /keepwarm extends the window still counts', async ($, on) => {
