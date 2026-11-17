@@ -1162,6 +1162,71 @@ describe('compaction readiness', () => {
     for await (const chunk of $.turn.step({ turnId: 'active', index, model: 'claude-fable-5-1', messageCount, agentId })) void chunk
   }
 
+  test('off during the first request clock read prevents automatic rearming', async ($, on) => {
+    let hold = false
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    on('clock.now', async () => {
+      if (hold) {
+        hold = false
+        await new Promise<void>(resolve => { release = resolve; opened() })
+      }
+      return { value: START }
+    })
+    on('clock.after', () => new Promise<{ value: void }>(() => {}))
+    on('clock.every', () => new Promise<{ value: void }>(() => {}))
+    const cold = usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })
+    world(on, [], { steps: [cold] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    hold = true
+    const pending = request($)
+    await held
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await pending
+    await $.turn.complete(turn({ usage: cold }))
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/1 cold write paid/)
+  })
+
+  test('off while a paid request waits preserves its receipt without rearming', async ($, on) => {
+    mock.clock(on, { now: START })
+    let calls = 0
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    world(on, [], { live: { tokens: 200000 }, steps: [usage(), usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })], stepGate: async () => {
+      if (++calls === 2) await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await request($)
+    const pending = request($, 1)
+    await held
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await pending
+    await $.turn.complete(turn({ usage: usage({ cache_creation_input_tokens: 200500 }) }))
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/1 cold write paid/)
+  })
+
+  test('an aborted turn with a successful summary request does not suppress the next cold write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { steps: [summary(), summary()], live: { tokens: 30000 } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.session.compact({ trigger: 'auto', messages })
+    await request($)
+    await $.turn.complete(turn({ usage: undefined, reason: 'error', isAborted: true }))
+    await clock.advance(2 * HOUR)
+    await request($)
+    await $.turn.complete(turn({ usage: summary() }))
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/1 cold write paid/)
+  })
+
   for (const kind of ['precompute', 'skipped', 'subagent'] as const) {
     test(`${kind} compaction leaves the existing prefix and ping schedule intact`, async ($, on) => {
       const clock = mock.clock(on, { now: START })

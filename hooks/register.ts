@@ -1026,27 +1026,30 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    let sid = s.sid
+    let gen = s.gen
     if (!e.agentId) {
       await reseat($, s)
-      const sid = s.sid
-      const gen = s.gen
-      const now = await $.clock.now()
-      if (s.sid !== sid || s.gen !== gen) return yield* next(e)
-      // The off count when the turn's first request went out: an off after it wins over what the turn opens.
+      sid = s.sid
+      gen = s.gen
+      // Capture the off count before the clock read; an off during that read must still defeat automatic arming.
       if (e.index === 0) s.turnOffs = s.offs
+      const now = await $.clock.now()
+      if (s.sid !== sid) return yield* next(e)
       // A compaction leaves a summary where tens of messages were; a rewind takes a few off. A request over fewer than half the
       // last one's messages is read as a compaction, whether or not session.compact arrived. The context stays as it was, so
       // turn.complete still scores a cold write this turn paid against it before the live figure replaces it.
-      if (e.messageCount * 2 < s.transcript) markCompacted(s)
-      s.transcript = e.messageCount
+      if (s.gen === gen) {
+        if (e.messageCount * 2 < s.transcript) markCompacted(s)
+        s.transcript = e.messageCount
+        gen = s.gen
+      }
       // Only a request sent before any compaction this turn saw can hold a cold write; what follows one is the summary.
       if (!s.compacted) s.steps++
       s.lastRequestAt = now
     }
-    const sid = s.sid
-    const gen = s.gen
     const r = yield* next(e)
-    if (s.sid !== sid || s.gen !== gen) return r
+    if (s.sid !== sid) return r
     // Each request's write is priced at its own prompt length's tier (Haiku 5.5 changes price at 100k), not the turn's sum.
     const u = r.usage
     if (!e.agentId && u && !s.compacted) {
@@ -1054,7 +1057,7 @@ export const register: Register = (on, options) => {
       const was = s.stepWrites ?? { tokens: 0, usd: 0, priced: true, largest: 0 }
       s.stepWrites = { tokens: was.tokens + u.cache_creation_input_tokens, usd: was.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: was.priced && price != null, largest: Math.max(was.largest, u.cache_creation_input_tokens) }
     }
-    if (!e.agentId && u && awaitingPrefix(s) && u.cache_read_input_tokens + u.cache_creation_input_tokens > 0) {
+    if (!e.agentId && u && s.gen === gen && awaitingPrefix(s) && u.cache_read_input_tokens + u.cache_creation_input_tokens > 0) {
       // A response over the new prefix can wait on a tool before turn.complete. Its summary write still scores nothing.
       s.prefixReady = true
       s.ctx = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
@@ -1085,7 +1088,7 @@ export const register: Register = (on, options) => {
     if (e.usage || (!e.isAborted && e.reason !== 'error')) s.lastResponseAt = now
     const compacted = s.compacted
     const prevContext = compacted ? s.preCompactCtx : s.ctx
-    if (e.usage || (!e.isAborted && e.reason !== 'error')) {
+    if (s.prefixReady || e.usage || (!e.isAborted && e.reason !== 'error')) {
       s.compacted = false
       s.prefixReady = false
       s.preCompactCtx = 0
