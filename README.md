@@ -49,7 +49,7 @@ Ping floor divides the estimated cold rewrite cost into an idle-break budget: 2 
 
 The first ping has no receipt, so it goes out. A later answer can cost more than estimated, so this is an estimate-based limit, not a guaranteed maximum bill. With no model price, context or priced receipts, no comparison can be made. Receipts and spend are in memory: a restart or new conversation clears them. Pings may end before the requested warming window.
 
-Display picks where the state shows while keepwarm is armed. `band` (the default) is the row above the prompt with the cube. `status` puts the same text in the status entry under the prompt and draws no row: use it when another mod owns the space above the prompt, or when the cube image garbles the terminal ([#34](https://github.com/karanb192/cache-tax/issues/34)). There is no setting that hides it: pings cost tokens, so the screen always says when they run.
+Display picks where the state shows while keepwarm is armed. `band` (the default) is the row above the prompt, with a text icon in terminals and the cube on Desktop. `status` puts the same text in the status entry under the prompt and draws no row: use it when another mod owns the space above the prompt. There is no setting that hides it: pings cost tokens, so the screen always says when they run.
 
 ## How it works
 
@@ -107,13 +107,13 @@ When the question is dismissed or a guarded headless run cannot show it, the ref
 
 The figure is an upper bound. The context count the engine reports for a resumed session is the last response's input, cache read, cache write and output together, and the resume payload carries no separate output count to take off; on one 15-day-old session the guard said 330,316 tokens and $6.61 and the write that followed was 314k tokens, $6.28.
 
-While keepwarm is armed, the terminal and Desktop Code tab show a row above the prompt, unless Display is `status`. Terminals use a bold `[>]` text icon with the state color. This removes the image path reported to corrupt [iTerm2 output](https://github.com/karanb192/cache-tax/issues/34). Desktop shows the Cache Tax cube, with a green lid for warm, orange for cold, and grey before the first turn or after compaction. The bold state label matches; the timer and receipt text use normal weight. A nonempty `NO_COLOR` selects a bold text icon on both surfaces and removes the state color. Both display choices say `warm`, `cold` or `unknown`, so color is never the only signal. These states use the same one-hour clock as `/cache-tax`; they are estimates, not a live server cache check.
+While keepwarm is armed, the terminal and Desktop Code tab show a row above the prompt, unless Display is `status`. Terminals use a bold `[>]` text icon with the state color. Desktop shows the Cache Tax cube, with a green lid for warm, orange for cold, and grey before the first turn or after compaction. The bold state label matches; the timer and receipt text use normal weight. A nonempty `NO_COLOR` selects a bold text icon on both surfaces and removes the state color. Both display choices say `warm`, `cold` or `unknown`, so color is never the only signal. These states use the same one-hour clock as `/cache-tax`; they are estimates, not a live server cache check.
 
 The row and plain status fallback refresh once a minute while keepwarm is armed, including while idle. Refreshing only updates the display; it sends no model request.
 
 The row includes the warming window, next ping and last readback. A stopped loop shows a neutral symbol and its reason. `/keepwarm off` or an expired window removes the row. Surveys temporarily take priority, and other mods' content stays in the band. Display `status` shows the same labelled text in the status entry; surfaces without a band keep the plain status text when Display remains `band`.
 
-The Desktop cube and the terminal's cold-state color follow Claude's light or dark theme. The embedded assets come from the website's official SVGs; maintainers can regenerate them with `python3 tools/generate-status-icons.py` and `rsvg-convert` installed. No image files are read or fetched at runtime.
+The Desktop cube and the terminal's cold-state color follow Claude's light or dark theme. The embedded SVGs come from the website's official assets; maintainers can regenerate them with `python3 tools/generate-status-icons.py`. No image files are read or fetched at runtime.
 
 The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
 
@@ -184,7 +184,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [294 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [296 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. A ping billed across a stop still counts, one finishing after a turn does not, and an errored turn keeps the skip. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.

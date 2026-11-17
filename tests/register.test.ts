@@ -179,26 +179,36 @@ describe('cache indicator', () => {
     expect(w.forks.length).toBe(0)
   })
 
-  test('a denied theme change preserves the existing icon', async ($, on) => {
-    mock.clock(on, { now: START })
-    world(on, [], { denyTheme: true })
-    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
-    await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
-    expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
-    await $.turn.complete(turn())
-    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
-  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a denied theme change preserves the existing cold color`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      world(on, [nothing], { denyTheme: true })
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '90m'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(HOUR)
+      expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
+      await clock.advance(MIN)
+      if (surface === 'terminal') expect((await ui.find({ type: 'Text', text: /^\[>\]$/ }))?.props.color).toBe('#d97757')
+      else expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.cold.svg)
+      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#d97757')
+    })
 
-  test('the written theme wins over the requested value', async ($, on) => {
-    mock.clock(on, { now: START })
-    world(on, [], { writtenTheme: 'light' })
-    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
-    await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
-    await $.config.set(themeChange('dark'))
-    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.neutral.svg)
-  })
+    test(`${surface}: the written theme wins over the requested value`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      world(on, [nothing], { writtenTheme: 'light' })
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '90m'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(HOUR)
+      await $.config.set(themeChange('dark'))
+      if (surface === 'terminal') expect((await ui.find({ type: 'Text', text: /^\[>\]$/ }))?.props.color).toBe('#c15f3c')
+      else expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.cold.svg)
+      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
+    })
+  }
 
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`${surface}: icon follows state and theme without terminal images`, async ($, on) => {

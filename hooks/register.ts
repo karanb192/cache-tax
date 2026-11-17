@@ -767,9 +767,8 @@ export const register: Register = (on, options) => {
     const state = cacheState(s, now)
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
-    const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
     const icon = e.surface === 'desktop' && !noColor
-      ? $.ui.resolve(e).Svg({ source: asset.svg, width: 18, height: 18, alt: 'Cache Tax' })
+      ? $.ui.resolve(e).Svg({ source: statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral'].svg, width: 18, height: 18, alt: 'Cache Tax' })
       : Text({ color, bold: true, children: ['[>]'] })
     return Box({ flexDirection: 'column', children: [
       rest,
