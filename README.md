@@ -82,7 +82,7 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
 ## Commands
 
     /keepwarm               keep warm for six hours
-    /keepwarm 90m           keep warm for a window of your own (also 2h30m, 6h)
+    /keepwarm 90m           keep warm for a window of your own, 1m to 168h (also 2h30m, 6h)
     /keepwarm always        keep every session warm until six hours after its last turn, remembered across sessions
     /keepwarm always 24h    the same, until 24 hours after the last turn (1h to 168h)
     /keepwarm 6h every 2m   pinging every two minutes; a testing knob, 1m to 59m, forgotten after this window (with always on, at your next turn)
@@ -96,6 +96,8 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
     /cache-tax guard refuse 5
                             ask only at $5 or more; below that, show the price and send
     /cache-tax guard test   ask once on the next prompt you send as if the cache were cold, priced at this session's context; the test scores nothing, a send into a really cold cache is scored as usual
+
+Extra words, invalid durations and windows outside the limits are rejected without changing the current warming window.
 
 The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath it:
 
@@ -184,7 +186,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [294 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [309 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. A ping billed across a stop still counts, one finishing after a turn does not, and an errored turn keeps the skip. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.
