@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; stepGate?: () => Promise<void>; compactGate?: () => Promise<void>; compactSkip?: string; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -65,11 +65,15 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('turn.step', async function* ($, e) {
     const u = opts.steps?.shift() ?? null
+    await opts.stepGate?.()
     yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: u }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: u }
   })
   on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
-  on('session.compact', ($, e) => ({ messages: e.messages }))
+  on('session.compact', async ($, e) => {
+    await opts.compactGate?.()
+    return opts.compactSkip === undefined ? { messages: e.messages } : { skip: opts.compactSkip }
+  })
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
@@ -1148,6 +1152,133 @@ describe('prices', () => {
     await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
     const card = await $.command.run(run('cache-tax', ''))
     expect(card.text).toMatch('cold cost   $0.02 to re-write it (warm turn $0.00)')
+  })
+})
+
+describe('compaction readiness', () => {
+  const messages = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
+  const summary = () => usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 30000 })
+  const request = async ($: Engine, index = 0, messageCount = 3, agentId?: string) => {
+    for await (const chunk of $.turn.step({ turnId: 'active', index, model: 'claude-fable-5-1', messageCount, agentId })) void chunk
+  }
+
+  for (const kind of ['precompute', 'skipped', 'subagent'] as const) {
+    test(`${kind} compaction leaves the existing prefix and ping schedule intact`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm], { compactSkip: kind === 'skipped' ? 'not needed' : undefined })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '3h'))
+      await clock.advance(10 * MIN)
+      await $.session.compact({ trigger: kind === 'precompute' ? 'precompute' : 'auto', messages, agentId: kind === 'subagent' ? 'child' : undefined })
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state       warm/)
+      await clock.advance(40 * MIN)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  for (const trigger of ['manual', 'auto', 'plugin'] as const) {
+    test(`${trigger} compaction resumes warming after a response without waiting for the whole turn`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [{ read: 30000, write: 0 }], { steps: [summary()] })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '3h'))
+      await $.session.compact({ trigger, messages })
+      await request($)
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state       warm/)
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(1)
+      await $.turn.complete(turn({ usage: summary() }))
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+    })
+  }
+
+  test('a shorter transcript resumes on its response when the compaction hook was hidden', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [{ read: 30000, write: 0 }], { steps: [usage(), summary()] })
+    await $.session.start(session)
+    await request($, 0, 40)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '3h'))
+    await request($, 0, 3)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await $.turn.complete(turn({ usage: summary() }))
+    expect(w.logs).toEqual([])
+  })
+
+  test('a failed post-compaction request and turn do not establish a warm prefix', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '3h'))
+    await $.session.compact({ trigger: 'auto', messages })
+    await request($)
+    await $.turn.complete(turn({ usage: undefined, reason: 'error', isAborted: true }))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(0)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/reset by compaction/)
+  })
+
+  test('a subagent response cannot establish the main prefix after compaction', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { steps: [summary()] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '3h'))
+    await $.session.compact({ trigger: 'auto', messages })
+    await request($, 0, 3, 'child')
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(0)
+  })
+
+  for (const interrupt of ['off', 'clear', 'compact'] as const) {
+    test(`${interrupt} during a post-compaction response drops its stale readiness`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      let release = () => {}
+      let opened = () => {}
+      const waiting = new Promise<void>(resolve => { opened = resolve })
+      const w = world(on, [warm], { steps: [summary()], stepGate: () => new Promise<void>(resolve => { release = resolve; opened() }) })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '3h'))
+      await $.session.compact({ trigger: 'auto', messages })
+      const pending = request($)
+      await waiting
+      if (interrupt === 'off') {
+        await $.command.run(run('keepwarm', 'off'))
+        await $.command.run(run('keepwarm', '3h'))
+      }
+      else if (interrupt === 'clear') await $.session.end({ sessionId: 'S1', reason: 'clear', resume: { id: 'S1' } })
+      else await $.session.compact({ trigger: 'auto', messages })
+      release()
+      await pending
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(0)
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+    })
+  }
+
+  test('a compaction completed after a conversation ended cannot reset the replacement', async ($, on) => {
+    mock.clock(on, { now: START })
+    let sid = 'S1'
+    let release = () => {}
+    let opened = () => {}
+    const waiting = new Promise<void>(resolve => { opened = resolve })
+    world(on, [], { sid: () => sid, compactGate: () => new Promise<void>(resolve => { release = resolve; opened() }) })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const pending = $.session.compact({ trigger: 'auto', messages })
+    await waiting
+    await $.session.end({ sessionId: 'S1', reason: 'clear', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear', session_id: sid })
+    await $.turn.complete(turn())
+    release()
+    await pending
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state       warm/)
   })
 })
 
