@@ -9,7 +9,7 @@ const STATUS_REFRESH_MS = 60 * 1000
 const MAX_RETRIES = 3
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
-const MAX_ALWAYS_MS = 168 * 60 * 60 * 1000
+const MAX_WINDOW_MS = 168 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
 /** A warm ping reads the prefix and writes only its own message: a write of this share of the read or more means the prefix broke. */
 const WARM_WRITE_SHARE = 0.1
@@ -166,13 +166,14 @@ function priceOf(model: string | null, promptTokens: number): Price | null {
 export function parseDuration(text: string): number | null {
   const m = /^(?:(\d+)h)?(?:(\d+)m)?$/.exec(text.trim())
   if (!m || (m[1] === undefined && m[2] === undefined)) return null
-  return (Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0)) * 60 * 1000
+  const ms = (Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0)) * 60 * 1000
+  return Number.isSafeInteger(ms) ? ms : null
 }
 
 /** The always switch as stored: true is the default window (all a store written by 2.3 or earlier holds), a number the window /keepwarm always <window> set. Anything else is off. */
 export function alwaysWindow(value: unknown): number {
   if (value === true) return DEFAULT_WINDOW_MS
-  return typeof value === 'number' && value >= TTL_MS && value <= MAX_ALWAYS_MS ? value : 0
+  return typeof value === 'number' && value >= TTL_MS && value <= MAX_WINDOW_MS ? value : 0
 }
 
 export function fmtDuration(ms: number): string {
@@ -430,12 +431,16 @@ function ackedKey(s: State): string {
   return `${KEY_ACKED}:${s.sid}`
 }
 
+function validDeadline(value: unknown, now: number): value is number {
+  return typeof value === 'number' && value > now && value <= now + MAX_WINDOW_MS
+}
+
 /** Clears this session's own dead window and the bare keys a store written before 2.1.1 still holds. Other sessions' keys are never touched: a read followed by a delete cannot be made atomic against their renewal. */
 async function prune($: EngineInterface, s: State, now: number) {
   for (const key of [KEY_DEADLINE, deadlineKey(s)]) {
     const deadline = await $.store.get(key)
     if (deadline === undefined) continue
-    if (typeof deadline === 'number' && deadline > now) continue
+    if (validDeadline(deadline, now)) continue
     await $.store.delete(key)
     await $.store.delete(KEY_EVERY + key.slice(KEY_DEADLINE.length))
   }
@@ -691,6 +696,8 @@ function noRewriteText(s: State, now: number): string {
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
+  const delay = s.lastRequestAt && !awaitingPrefix(s) && !isCold(s, now) ? Math.max(1000, s.lastRequestAt + s.every - now) : s.every
+  if (windowMs <= delay) return `keepwarm on for ${fmtDuration(windowMs)}. At the current timing, the window ends before a ping is due; use a longer window or a shorter every period`
   if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written` +
     (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
@@ -796,10 +803,8 @@ export const register: Register = (on, options) => {
     const state = cacheState(s, now)
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
-    const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
-    const icon = noColor ? Text({ bold: true, children: ['[>]'] })
-      : e.surface === 'terminal' ? $.ui.resolve(e).Image({ source: { png: asset.png }, columns: 3, rows: 1, alt: '[>]' })
-      : e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: asset.svg, width: 18, height: 18, alt: 'Cache Tax' })
+    const icon = e.surface === 'desktop' && !noColor
+      ? $.ui.resolve(e).Svg({ source: statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral'].svg, width: 18, height: 18, alt: 'Cache Tax' })
       : Text({ color, bold: true, children: ['[>]'] })
     return Box({ flexDirection: 'column', children: [
       rest,
@@ -831,7 +836,7 @@ export const register: Register = (on, options) => {
     const saved = await $.store.get(deadlineKey(s))
     const savedEvery = await $.store.get(everyKey(s))
     const savedGuard = await $.store.get(KEY_GUARD)
-    s.deadline = typeof saved === 'number' && saved > now ? saved : 0
+    s.deadline = validDeadline(saved, now) ? saved : 0
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
     // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
     s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
@@ -893,8 +898,27 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'keepwarm' }, async ($, e) => {
-    await reseat($, s)
     const words = String(e.args ?? '').trim().split(/\s+/).filter(Boolean)
+    const mode = words[0]
+    const window = (mode === 'always'
+      ? words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]!) : null
+      : !words.length ? DEFAULT_WINDOW_MS : parseDuration(mode!)) ?? 0
+    let every = PING_AFTER_MS
+    const usage = 'keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged'
+    if (mode === 'off' || mode === 'status') {
+      if (words.length !== 1) return { text: `${mode} takes no other words; keepwarm is unchanged` }
+    } else if (mode === 'always') {
+      if (window < TTL_MS || window > MAX_WINDOW_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
+    } else {
+      if (window < MIN_PING_MS || window > MAX_WINDOW_MS ||
+        (words.length > 1 && (words.length !== 3 || words[1] !== 'every'))) return { text: usage }
+      if (words[1] === 'every') {
+        const period = parseDuration(words[2]!)
+        if (period == null || period < MIN_PING_MS || period >= TTL_MS) return { text: 'every takes a period from 1m to 59m' }
+        every = period
+      }
+    }
+    await reseat($, s)
     const now = await $.clock.now()
     if (words[0] === 'off') {
       const wasAlways = s.always
@@ -902,9 +926,7 @@ export const register: Register = (on, options) => {
       return { text: wasAlways ? 'keepwarm is off, and always is off for every session from its next turn' : 'keepwarm is off' }
     }
     if (words[0] === 'always') {
-      // One optional window and nothing after it: a dropped trailing word would arm something other than what was typed.
-      const windowMs = words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]!) : null
-      if (windowMs == null || windowMs < TTL_MS || windowMs > MAX_ALWAYS_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
+      const windowMs = window
       s.always = true
       s.alwaysMs = windowMs
       // Before any await: a turn finishing meanwhile may have read the old setting, and must renew with this one instead.
@@ -920,16 +942,6 @@ export const register: Register = (on, options) => {
       return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
     }
     if (words[0] !== 'status') {
-      const window = parseDuration(words[0]!)
-      if (!window) return { text: 'keepwarm takes a window such as 6h or 90m, or always, off, or status' }
-      // "every 2m" is a testing knob and lasts only for the window it was given with.
-      let every = PING_AFTER_MS
-      if (words[1] === 'every') {
-        const period = parseDuration(words[2] ?? '')
-        // A period of the cache's whole hour or more would fire only once the cache is already cold.
-        if (period == null || period < MIN_PING_MS || period >= TTL_MS) return { text: 'every takes a period from 1m to 59m' }
-        every = period
-      }
       await startWindow($, s, window, every)
       const rolls = s.always && (window < s.alwaysMs || every !== PING_AFTER_MS)
       return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(s.alwaysMs)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }

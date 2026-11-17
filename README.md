@@ -49,7 +49,7 @@ Ping floor divides the estimated cold rewrite cost into an idle-break budget: 2 
 
 The first ping has no receipt, so it goes out. A later answer can cost more than estimated, so this is an estimate-based limit, not a guaranteed maximum bill. With no model price, context or priced receipts, no comparison can be made. Receipts and spend are in memory: a restart or new conversation clears them. Pings may end before the requested warming window.
 
-Display picks where the state shows while keepwarm is armed. `band` (the default) is the row above the prompt with the cube. `status` puts the same text in the status entry under the prompt and draws no row: use it when another mod owns the space above the prompt, or when the cube image garbles the terminal ([#34](https://github.com/karanb192/cache-tax/issues/34)). There is no setting that hides it: pings cost tokens, so the screen always says when they run.
+Display picks where the state shows while keepwarm is armed. `band` (the default) is the row above the prompt, with a text icon in terminals and the cube on Desktop. `status` puts the same text in the status entry under the prompt and draws no row: use it when another mod owns the space above the prompt. There is no setting that hides it: pings cost tokens, so the screen always says when they run.
 
 ## How it works
 
@@ -90,7 +90,7 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
 ## Commands
 
     /keepwarm               keep warm for six hours
-    /keepwarm 90m           keep warm for a window of your own (also 2h30m, 6h)
+    /keepwarm 90m           keep warm for a window of your own, 1m to 168h (also 2h30m, 6h)
     /keepwarm always        keep every session warm until six hours after its last turn, remembered across sessions
     /keepwarm always 24h    the same, until 24 hours after the last turn (1h to 168h)
     /keepwarm 6h every 2m   pinging every two minutes; a testing knob, 1m to 59m, forgotten after this window (with always on, at your next turn)
@@ -105,6 +105,8 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
                             ask only at $5 or more; below that, show the price and send
     /cache-tax guard test   ask once on the next prompt you send as if the cache were cold, priced at this session's context; the test scores nothing, a send into a really cold cache is scored as usual
 
+`/keepwarm` rejects extra words, invalid durations and windows outside the limits without changing the current warming window. It also discards invalid or overlong stored deadlines on startup. A window that ends before its first ping is due says so in its reply.
+
 The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath it:
 
     cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?
@@ -115,13 +117,13 @@ When the question is dismissed or a guarded headless run cannot show it, the ref
 
 The figure is an upper bound. The context count the engine reports for a resumed session is the last response's input, cache read, cache write and output together, and the resume payload carries no separate output count to take off; on one 15-day-old session the guard said 330,316 tokens and $6.61 and the write that followed was 314k tokens, $6.28.
 
-While keepwarm is armed, the terminal and Desktop Code tab show a row above the prompt with the Cache Tax cube, unless Display is `status`. Its lid is green for warm, orange for cold, and grey before the first turn or after compaction. The bold state label matches; the timer and receipt text use normal weight. Ghostty and kitty can draw the image; other terminals show `[>]` in its place. A nonempty `NO_COLOR` selects a bold text icon and an uncolored state label. Both display choices say `warm`, `cold` or `unknown`, so color is never the only signal. These states use the same one-hour clock as `/cache-tax`; they are estimates, not a live server cache check.
+While keepwarm is armed, the terminal and Desktop Code tab show a row above the prompt, unless Display is `status`. Terminals use a bold `[>]` text icon with the state color. Desktop shows the Cache Tax cube, with a green lid for warm, orange for cold, and grey before the first turn or after compaction. The bold state label matches; the timer and receipt text use normal weight. A nonempty `NO_COLOR` selects a bold text icon on both surfaces and removes the state color. Both display choices say `warm`, `cold` or `unknown`, so color is never the only signal. These states use the same one-hour clock as `/cache-tax`; they are estimates, not a live server cache check.
 
 The row and plain status fallback refresh once a minute while keepwarm is armed, including while idle. Refreshing only updates the display; it sends no model request.
 
 The row includes the warming window, next ping and last readback. A stopped loop shows a neutral symbol and its reason. `/keepwarm off` or an expired window removes the row. Surveys temporarily take priority, and other mods' content stays in the band. Display `status` shows the same labelled text in the status entry; surfaces without a band keep the plain status text when Display remains `band`.
 
-The cube follows Claude's light or dark theme. Its terminal image also has a contrasting edge for terminal backgrounds that differ from that setting. The embedded assets come from the website's official SVGs; maintainers can regenerate them with `python3 tools/generate-status-icons.py` and `rsvg-convert` installed. No image files are read or fetched at runtime.
+The Desktop cube and the terminal's cold-state color follow Claude's light or dark theme. The embedded SVGs come from the website's official assets; maintainers can regenerate them with `python3 tools/generate-status-icons.py`. No image files are read or fetched at runtime.
 
 The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
 
@@ -192,7 +194,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [339 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [366 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. A ping billed across a stop still counts, one finishing after a turn does not, and an errored turn keeps the skip. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.
@@ -203,7 +205,7 @@ The [339 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 - **Compaction readiness:** preparing or skipping a summary leaves warming alone. After an applied compaction, a main response that reads or writes cache lets warming resume while the turn waits on tools or a user answer. Summary writes stay out of the cold-write tally; failed requests and stale responses after a clear, stop or newer compaction cannot restart pings.
 - **Managed plugins above the mod:** `/clear`, resume, a restored window and compaction with the classic and compaction events continued beneath the user tier, the same events delivered twice or out of order without a second window, warning or reset, a window and a model change carried through an in-process resume, a transcript that turns old enough to be cold after its resume, a rewind told apart from a compaction, a summary write that is no cold write beside a cold write that is (a guarded send compacted before its first request, two compactions in one turn), an end of the old conversation that overlaps or outlasts the classic resume, and a `/keepwarm` run before the host reports the next conversation's id.
 - **Pricing and display:** a row for every listed model in its dated, provider and display-name spellings, no borrowed row for a version the table does not list, a cold write with no price row counted apart from the dollar total, the Haiku 5.5 long-prompt tier priced per request, a long warm turn whose requests together write half the context kept apart from a cold write, guarded cache hits and large pastes left unscored, partial rewrites separated from new content, later reads that cannot hide a per-request miss, old receipts dropped across a held request or context read during clear, Opus 4 and 4.1 apart from Opus 4.5, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
-- **Indicator:** terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
+- **Indicator:** terminal text icons without image elements, desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content and `NO_COLOR` fallback.
 - **Display option:** `band` draws the row; `status` moves the text, including its cache-tax and state label, to the status entry on terminal and Desktop surfaces with no row. Any other value, such as an old `off`, falls back to the row.
 - **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
 - **Fork failures:** a busy API is retried while the cache is warm, a retry that wakes too late is dropped, nothing to fork waits for the next turn, one ping is out at a time, a reply that lands after a request, `/clear` or compaction is discarded, and other failures and the null result returned by older releases stop without retrying.

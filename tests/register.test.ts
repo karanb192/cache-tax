@@ -168,67 +168,83 @@ describe('cache indicator', () => {
   test('redraws reuse session preferences and theme changes repaint immediately', async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
     await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '2h'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
     expect(w.reads).toEqual({ theme: 1, env: 1 })
     await $.config.set(themeChange('light'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.warm.svg)
     await $.config.set(themeChange('dark'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
     expect(w.reads).toEqual({ theme: 1, env: 1 })
     expect(w.forks.length).toBe(0)
   })
 
-  test('a denied theme change preserves the existing icon', async ($, on) => {
-    mock.clock(on, { now: START })
-    world(on, [], { denyTheme: true })
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
-    await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
-    await $.turn.complete(turn())
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
-  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a denied theme change preserves the existing cold color`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      world(on, [nothing], { denyTheme: true })
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '90m'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(HOUR)
+      expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
+      await clock.advance(MIN)
+      if (surface === 'terminal') expect((await ui.find({ type: 'Text', text: /^\[>\]$/ }))?.props.color).toBe('#d97757')
+      else expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.cold.svg)
+      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#d97757')
+    })
 
-  test('the written theme wins over the requested value', async ($, on) => {
-    mock.clock(on, { now: START })
-    world(on, [], { writtenTheme: 'light' })
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
-    await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    await $.config.set(themeChange('dark'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.neutral.png })
-  })
+    test(`${surface}: the written theme wins over the requested value`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      world(on, [nothing], { writtenTheme: 'light' })
+      await $.session.start({ ...session, surface, isInteractive: true })
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '90m'))
+      const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
+      await clock.advance(HOUR)
+      await $.config.set(themeChange('dark'))
+      if (surface === 'terminal') expect((await ui.find({ type: 'Text', text: /^\[>\]$/ }))?.props.color).toBe('#c15f3c')
+      else expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.cold.svg)
+      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
+    })
+  }
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: official cube follows state and theme with a text alternative`, async ($, on) => {
+    test(`${surface}: icon follows state and theme without terminal images`, async ($, on) => {
       const clock = mock.clock(on, { now: 10 * HOUR })
       const theme = { value: 'dark' }
       const w = world(on, [nothing], { theme })
       await $.session.start({ ...session, surface, isInteractive: true })
       await $.command.run(run('keepwarm', '3h'))
       const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
-      const type = surface === 'terminal' ? 'Image' : 'Svg'
-      const source = (variant: typeof statusIcons.dark) => surface === 'terminal' ? { png: variant.neutral.png } : variant.neutral.svg
-      expect((await ui.find({ type }))?.props.source).toEqual(source(statusIcons.dark))
-      expect((await ui.find({ type }))?.props.alt).toBe(surface === 'terminal' ? '[>]' : 'Cache Tax')
-      if (surface === 'terminal') {
-        expect((await ui.find({ type }))?.props.columns).toBe(3)
-        expect((await ui.find({ type }))?.props.rows).toBe(1)
+      const icon = () => ui.find(surface === 'terminal' ? { type: 'Text', text: /^\[>\]$/ } : { type: 'Svg' })
+      const check = async (state: 'neutral' | 'warm' | 'cold', light: boolean) => {
+        expect(await ui.find({ type: 'Image' })).toBe(undefined)
+        if (surface === 'terminal') {
+          expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+          expect((await icon())?.props.bold).toBe(true)
+          expect((await icon())?.props.color).toBe(state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined)
+        } else {
+          expect((await icon())?.props.source).toBe(statusIcons[light ? 'light' : 'dark'][state].svg)
+          expect((await icon())?.props.alt).toBe('Cache Tax')
+        }
       }
+      await check('neutral', false)
       await $.turn.complete(turn())
-      expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.dark.warm.png } : statusIcons.dark.warm.svg)
-      await $.config.set(themeChange('light'))
+      await check('warm', false)
       await clock.advance(HOUR)
-      expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.light.cold.png } : statusIcons.light.cold.svg)
+      await check('cold', false)
+      await $.config.set(themeChange('light'))
+      await check('cold', true)
       expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
       expect(w.forks.length).toBe(1)
       await $.command.run(run('keepwarm', 'off'))
-      expect(await ui.find({ type })).toBe(undefined)
+      expect(await icon()).toBe(undefined)
     })
 
     test(`${surface}: NO_COLOR uses a bold text icon and uncolored state`, async ($, on) => {
@@ -1348,6 +1364,113 @@ describe('compaction readiness', () => {
 })
 
 describe('keepwarm input', () => {
+  for (const saved of [null, Infinity, Number.MAX_SAFE_INTEGER, START + 169 * HOUR]) {
+    test(`discards an invalid stored deadline ${saved}`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>([['deadline:S1', saved], ['every:S1', MIN]])
+      const w = world(on, [warm], { store })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      expect(store.has('deadline:S1')).toBe(false)
+      expect(store.has('every:S1')).toBe(false)
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+      await clock.advance(HOUR)
+      expect(w.forks.length).toBe(0)
+    })
+  }
+
+  test('restores the longest valid stored deadline', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:S1', START + 168 * HOUR]])
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 168 * HOUR)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/keepwarm 7d 0h left/)
+  })
+
+  test('restores a bounded deadline from a fractional millisecond clock', async ($, on) => {
+    mock.clock(on, { now: START + 0.5 })
+    const deadline = START + 0.5 + 168 * HOUR
+    const store = new Map<string, unknown>([['deadline:S1', deadline]])
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(deadline)
+  })
+
+  test('a short window explains when its current timing cannot reach a ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const short = await $.command.run(run('keepwarm', '30m'))
+    expect(short.text).toMatch(/window ends before a ping is due/)
+    await clock.advance(30 * MIN)
+    expect(w.forks.length).toBe(0)
+    const later = await $.command.run(run('keepwarm', '30m'))
+    expect(later.text).toMatch(/a ping 50m after each idle stretch/)
+    await clock.advance(20 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('duration arithmetic rejects infinite and unsafe results', async () => {
+    expect(parseDuration('9'.repeat(310) + 'h')).toBe(null)
+    expect(parseDuration('999999999999h')).toBe(null)
+    expect(parseDuration('150119987580m')).toBe(null)
+    expect(parseDuration('150119987579m')).toBe(150119987579 * MIN)
+    expect(parseDuration('168h')).toBe(168 * HOUR)
+  })
+
+  for (const args of ['6h every 1m off', '90m banana', '6h every 2m 5m', '6h always',
+    '6h every', '6h every 1m every 2m', 'off always', 'status off',
+    '169h', '168h1m', '999999999999h', '9'.repeat(310) + 'h']) {
+    test(`rejects ${args.length > 40 ? 'overflow' : args} without changing an armed window`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>()
+      const writes: string[] = []
+      const w = world(on, [warm], { store, storeGate: async (op, key) => { if (op !== 'get') writes.push(`${op}:${key}`) } })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', 'always 24h'))
+      const before = [...store]
+      writes.length = 0
+      const reply = await $.command.run(run('keepwarm', args))
+      expect(reply.text).toBe(args.startsWith('off ') ? 'off takes no other words; keepwarm is unchanged'
+        : args.startsWith('status ') ? 'status takes no other words; keepwarm is unchanged'
+        : 'keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged')
+      expect([...store]).toEqual(before)
+      expect(writes).toEqual([])
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/24h00m left · ping in 50m/)
+      await clock.advance(49 * MIN)
+      expect(w.forks.length).toBe(0)
+      await clock.advance(MIN)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  test('overflow before the first turn stores no deadline and schedules no ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    const reply = await $.command.run(run('keepwarm', '9'.repeat(310) + 'h'))
+    expect(reply.text).toMatch(/^keepwarm takes a window/)
+    expect(store.has('deadline:S1')).toBe(false)
+    await clock.advance(HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('one-off window boundaries and whitespace remain usable', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '1m'))
+    expect(store.get('deadline:S1')).toBe(START + MIN)
+    await $.command.run(run('keepwarm', '  168h  every\t59m  '))
+    expect(store.get('deadline:S1')).toBe(START + 168 * HOUR)
+    expect(store.get('every:S1')).toBe(59 * MIN)
+  })
+
   for (const args of ['3h every 60m', '3h every 90m', '3h every 2h']) {
     test(`${args} is refused, since it would only fire on a cold cache`, async ($, on) => {
       mock.clock(on, { now: START })
@@ -1375,7 +1498,7 @@ describe('keepwarm input', () => {
       world(on, [])
       await $.session.start(session)
       const r = await $.command.run(run('keepwarm', args))
-      expect(r.text).toBe('keepwarm takes a window such as 6h or 90m, or always, off, or status')
+      expect(r.text).toBe('keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged')
     })
   }
 
@@ -4154,6 +4277,69 @@ describe('compaction with receipt accounting', () => {
     for await (const chunk of $.turn.step({ turnId: 'combined', index, model: 'claude-fable-5-1', messageCount })) void chunk
   }
 
+  test('a short window uses the ready post-compaction prefix when describing its first ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [{ read: 30000, write: 0 }], { steps: [usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 30000 })] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    await step($, 0, 3)
+    await clock.advance(49 * MIN)
+    expect((await $.command.run(run('keepwarm', '2m'))).text).toMatch(/^keepwarm on for 2m, a ping 50m after each idle stretch/)
+    await clock.advance(MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('off during the first request clock read prevents completion from reopening warming', async ($, on) => {
+    let hold = false
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    on('clock.now', async () => {
+      if (hold) {
+        hold = false
+        await new Promise<void>(resolve => { release = resolve; opened() })
+      }
+      return { value: START }
+    })
+    on('clock.after', () => new Promise<{ value: void }>(() => {}))
+    on('clock.every', () => new Promise<{ value: void }>(() => {}))
+    const w = world(on, [], { steps: [usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    hold = true
+    const pending = step($, 0)
+    await held
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await pending
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+    expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
+  })
+
+  test('off during a paid request preserves its rewrite receipt without arming', async ($, on) => {
+    mock.clock(on, { now: START })
+    let calls = 0
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    const w = world(on, [], { live: { tokens: 200000 }, steps: [usage(), usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 })], stepGate: async () => {
+      if (++calls === 2) await new Promise<void>(resolve => { release = resolve; opened() })
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await step($, 0)
+    const pending = step($, 1)
+    await held
+    await $.command.run(run('keepwarm', 'off'))
+    release()
+    await pending
+    await $.turn.complete(turn({ usage: usage({ cache_creation_input_tokens: 200500 }) }))
+    expect(w.logs.at(-1)).toBe('cold write of 200k tokens paid ($4.00).')
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+  })
+
   test('a paid rewrite before compaction retains its original context after warming resumes', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [{ read: 30000, write: 0 }], { steps: [usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }), usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 30000 })] })
@@ -4199,7 +4385,7 @@ describe('display option', () => {
     world(on, [])
     await armed($)
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBeTruthy()
   })
 
   for (const surface of ['terminal', 'desktop'] as const) test(`status moves the state to the ${surface} status entry and draws no row`, { options: { display: 'status' } }, async ($, on) => {
@@ -4209,6 +4395,8 @@ describe('display option', () => {
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
     expect(await ui.find({ type: 'Image' })).toBe(undefined)
     expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBe(undefined)
+    expect(await ui.find({ text: 'cache-tax' })).toBe(undefined)
     expect(w.status.at(-1)).toBe('cache-tax · warm · keepwarm 1h30m left · ping in 50m')
   })
 
@@ -4217,7 +4405,7 @@ describe('display option', () => {
     const w = world(on, [])
     await armed($)
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBeTruthy()
     expect(w.status.every(text => text === undefined)).toBe(true)
   })
 })
