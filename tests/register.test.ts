@@ -1969,6 +1969,83 @@ describe('cold-write receipt evidence', () => {
       expect(w.logs).toEqual([])
     })
   }
+
+  for (const stage of ['period reset', 'period write', 'deadline write'] as const) {
+    for (const seatBeforeRelease of [false, true]) {
+      test(`clear during the automatic window ${stage} cannot arm ${seatBeforeRelease ? 'the replacement session' : 'the unseated conversation'}`, async ($, on) => {
+        const clock = mock.clock(on, { now: START })
+        let sid = 'S1'
+        let hold = false
+        let release = () => {}
+        let opened = () => {}
+        const held = new Promise<void>(resolve => { opened = resolve })
+        const store = new Map<string, unknown>(stage === 'period write' ? [['deadline:S1', START + HOUR], ['every:S1', MIN]] : [])
+        const deadlineWrites: string[] = []
+        const w = world(on, [warm], { store, sid: () => sid, storeGate: async (op, key) => {
+          if (op === 'set' && key.startsWith('deadline:')) deadlineWrites.push(key)
+          const target = stage === 'deadline write' ? op === 'set' && key === 'deadline:S1'
+            : op === (stage === 'period write' ? 'set' : 'delete') && key === 'every:S1'
+          if (hold && target) {
+            hold = false
+            await new Promise<void>(resolve => { release = resolve; opened() })
+          }
+        } })
+        await $.session.start(session)
+        await $.turn.complete(turn())
+        hold = true
+        const pending = $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+        await held
+        await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+        sid = 'S2'
+        if (seatBeforeRelease) await $.classic.SessionStart({ source: 'clear', session_id: sid })
+        release()
+        await pending
+        if (!seatBeforeRelease) await $.classic.SessionStart({ source: 'clear', session_id: sid })
+        expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+        expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+        expect(deadlineWrites.filter(key => key !== 'deadline:S1')).toEqual([])
+        expect(store.has('deadline:')).toBe(false)
+        expect(store.has('deadline:S2')).toBe(false)
+        expect(w.logs).toEqual([])
+        await $.turn.complete(turn())
+        await clock.advance(50 * MIN)
+        expect(w.forks).toEqual([])
+      })
+    }
+  }
+
+  test('a stale automatic deadline write cannot erase a replacement manual window with the same deadline', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let sid = 'S1'
+    let hold = false
+    let release = () => {}
+    let opened = () => {}
+    const held = new Promise<void>(resolve => { opened = resolve })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm], { store, sid: () => sid, storeGate: async (op, key) => {
+      if (hold && op === 'set' && key === 'deadline:S1') {
+        hold = false
+        await new Promise<void>(resolve => { release = resolve; opened() })
+      }
+    } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    hold = true
+    const pending = $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    await held
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear', session_id: sid })
+    await $.command.run(run('keepwarm', '3h'))
+    expect(store.get('deadline:S2')).toBe(START + 3 * HOUR)
+    release()
+    await pending
+    expect(store.get('deadline:S2')).toBe(START + 3 * HOUR)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/^keepwarm 3h00m left/)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks).toEqual([0])
+  })
 })
 
 describe('per-request pricing and window extension', () => {
