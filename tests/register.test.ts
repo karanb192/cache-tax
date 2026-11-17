@@ -164,17 +164,17 @@ describe('cache indicator', () => {
   test('redraws reuse session preferences and theme changes repaint immediately', async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
     await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '2h'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
     expect(w.reads).toEqual({ theme: 1, env: 1 })
     await $.config.set(themeChange('light'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.warm.svg)
     await $.config.set(themeChange('dark'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
     expect(w.reads).toEqual({ theme: 1, env: 1 })
     expect(w.forks.length).toBe(0)
   })
@@ -182,49 +182,55 @@ describe('cache indicator', () => {
   test('a denied theme change preserves the existing icon', async ($, on) => {
     mock.clock(on, { now: START })
     world(on, [], { denyTheme: true })
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
     await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
     expect((await $.config.set(themeChange('light'))).deny).toBe('theme locked')
     await $.turn.complete(turn())
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.dark.warm.svg)
   })
 
   test('the written theme wins over the requested value', async ($, on) => {
     mock.clock(on, { now: START })
     world(on, [], { writtenTheme: 'light' })
-    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
     await $.command.run(run('keepwarm', '90m'))
-    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
     await $.config.set(themeChange('dark'))
-    expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.neutral.png })
+    expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(statusIcons.light.neutral.svg)
   })
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: official cube follows state and theme with a text alternative`, async ($, on) => {
+    test(`${surface}: icon follows state and theme without terminal images`, async ($, on) => {
       const clock = mock.clock(on, { now: 10 * HOUR })
       const theme = { value: 'dark' }
       const w = world(on, [nothing], { theme })
       await $.session.start({ ...session, surface, isInteractive: true })
       await $.command.run(run('keepwarm', '3h'))
       const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
-      const type = surface === 'terminal' ? 'Image' : 'Svg'
-      const source = (variant: typeof statusIcons.dark) => surface === 'terminal' ? { png: variant.neutral.png } : variant.neutral.svg
-      expect((await ui.find({ type }))?.props.source).toEqual(source(statusIcons.dark))
-      expect((await ui.find({ type }))?.props.alt).toBe(surface === 'terminal' ? '[>]' : 'Cache Tax')
-      if (surface === 'terminal') {
-        expect((await ui.find({ type }))?.props.columns).toBe(3)
-        expect((await ui.find({ type }))?.props.rows).toBe(1)
+      const icon = () => ui.find(surface === 'terminal' ? { type: 'Text', text: /^\[>\]$/ } : { type: 'Svg' })
+      const check = async (state: 'neutral' | 'warm' | 'cold', light: boolean) => {
+        expect(await ui.find({ type: 'Image' })).toBe(undefined)
+        if (surface === 'terminal') {
+          expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+          expect((await icon())?.props.bold).toBe(true)
+          expect((await icon())?.props.color).toBe(state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined)
+        } else {
+          expect((await icon())?.props.source).toBe(statusIcons[light ? 'light' : 'dark'][state].svg)
+          expect((await icon())?.props.alt).toBe('Cache Tax')
+        }
       }
+      await check('neutral', false)
       await $.turn.complete(turn())
-      expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.dark.warm.png } : statusIcons.dark.warm.svg)
-      await $.config.set(themeChange('light'))
+      await check('warm', false)
       await clock.advance(HOUR)
-      expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.light.cold.png } : statusIcons.light.cold.svg)
+      await check('cold', false)
+      await $.config.set(themeChange('light'))
+      await check('cold', true)
       expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
       expect(w.forks.length).toBe(1)
       await $.command.run(run('keepwarm', 'off'))
-      expect(await ui.find({ type })).toBe(undefined)
+      expect(await icon()).toBe(undefined)
     })
 
     test(`${surface}: NO_COLOR uses a bold text icon and uncolored state`, async ($, on) => {
@@ -3679,7 +3685,7 @@ describe('display option', () => {
     world(on, [])
     await armed($)
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBeTruthy()
   })
 
   for (const surface of ['terminal', 'desktop'] as const) test(`status moves the state to the ${surface} status entry and draws no row`, { options: { display: 'status' } }, async ($, on) => {
@@ -3689,6 +3695,8 @@ describe('display option', () => {
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface, component: 'AbovePrompt', props: bandProps })
     expect(await ui.find({ type: 'Image' })).toBe(undefined)
     expect(await ui.find({ type: 'Svg' })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBe(undefined)
+    expect(await ui.find({ text: 'cache-tax' })).toBe(undefined)
     expect(w.status.at(-1)).toBe('cache-tax · warm · keepwarm 1h30m left · ping in 50m')
   })
 
@@ -3697,7 +3705,7 @@ describe('display option', () => {
     const w = world(on, [])
     await armed($)
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Image' })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^\[>\]$/ })).toBeTruthy()
     expect(w.status.every(text => text === undefined)).toBe(true)
   })
 })
