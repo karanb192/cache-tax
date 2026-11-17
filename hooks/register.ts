@@ -103,6 +103,8 @@ export type State = {
   lastModel: string | null
   ctx: number
   compacted: boolean
+  prefixReady: boolean
+  preCompactCtx: number
   resumedAt: number
   transcript: number
   guard: GuardMode
@@ -130,14 +132,19 @@ export type State = {
   turnOffs: number | null
   inFlight: boolean
   stepWrites: StepWrites | null
-  steps: number
   endingSid: string
   /** The model already named in the no-price notice, so it is said once per model. */
   unpricedTold: string
 }
 
-/** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage, and the most one of them wrote. */
+/** Rewrites of the preceding turn's context before compaction, priced per request, and the largest one. */
 type StepWrites = { tokens: number; usd: number; priced: boolean; largest: number }
+
+function rewrittenTokens(previous: number, read: number, written: number): number {
+  const rewritten = Math.min(written, Math.max(0, previous - read))
+  // Context counts can include an uncached tail. As with pings, a small write beside a large read is a hit.
+  return rewritten < WARM_WRITE_SHARE * read ? 0 : rewritten
+}
 
 /**
  * The table key for a model id or display name: provider wrappers (anthropic., us.anthropic., -v1:0), the [1m]
@@ -214,8 +221,12 @@ function breakEvenPings(s: State): number | null {
   return Math.floor(price[1] / price[0])
 }
 
+function awaitingPrefix(s: State): boolean {
+  return s.compacted && !s.prefixReady
+}
+
 function isCold(s: State, now: number): boolean {
-  return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= TTL_MS
+  return s.lastRequestAt > 0 && !awaitingPrefix(s) && now - s.lastRequestAt >= TTL_MS
 }
 
 function costText(s: State): string {
@@ -271,6 +282,8 @@ export function resetForClear(s: State) {
   s.lastRequestAt = 0
   s.lastResponseAt = 0
   s.compacted = false
+  s.prefixReady = false
+  s.preCompactCtx = 0
   s.resumedAt = 0
   s.transcript = 0
   s.ackedAt = 0
@@ -278,7 +291,6 @@ export function resetForClear(s: State) {
   s.misses = []
   s.waitForTurn = false
   s.stepWrites = null
-  s.steps = 0
   s.testOnce = false
   // The last receipt priced the old conversation's context; the next one's first ping makes its own.
   s.last = null
@@ -302,6 +314,8 @@ export function seedFromResume(s: State, e: ResumeFields, now: number): string |
   }
   if (typeof e.model === 'string') s.lastModel = e.model
   s.compacted = false
+  s.prefixReady = false
+  s.preCompactCtx = 0
   if (e.prompt_cache_likely_expired !== true || s.ctx < BIG_TOKENS) return null
   const usd = typeof e.estimated_cache_write_usd === 'number' ? fmtUsd(e.estimated_cache_write_usd) : fmtUsd(coldUsd(s))
   return `resuming cold. The first message re-writes ${s.ctx.toLocaleString('en-US')} tokens, about ${usd}. /clear and paste a summary if you only need the conclusions.`
@@ -322,7 +336,9 @@ function unknownText(s: State): string {
 
 /** The conversation was summarized: the next request is the first over the new prefix, and a ping out for the old one is dropped. */
 function markCompacted(s: State) {
+  if (!s.compacted) s.preCompactCtx = s.ctx
   s.compacted = true
+  s.prefixReady = false
   s.transcript = 0
   s.ackedAt = 0
   outdate(s)
@@ -333,7 +349,7 @@ function statusText(s: State, now: number): string | undefined {
   if (!s.deadline) return undefined
   const pingText = s.last ? ` · last ping read ${fmtTok(s.last.read)} ${fmtUsd(s.last.usd)}` : ''
   const nextText = !s.lastRequestAt ? ' · waiting for the first turn'
-    : s.compacted ? ' · waiting for the first turn after compaction'
+    : awaitingPrefix(s) ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : s.waitForTurn ? ' · nothing to fork yet, first ping after the next turn'
     : s.skipping ? ` · ping skipped, idle budget ${fmtUsd(coldUsd(s) == null ? null : coldUsd(s)! / pingFloor)} reached`
@@ -345,7 +361,7 @@ function statusText(s: State, now: number): string | undefined {
 /** The read-only view `$.cacheTax.status()` gives other mods. */
 export function statusOf(s: State, now: number): CacheTaxStatus {
   const open = !s.stopped && s.deadline > now
-  const known = Boolean(s.lastRequestAt) && !s.compacted
+  const known = Boolean(s.lastRequestAt) && !awaitingPrefix(s)
   return {
     keepwarm: s.stopped ? 'stopped' : open ? 'on' : 'off',
     leftMs: open ? s.deadline - now : 0,
@@ -363,7 +379,7 @@ export function statusOf(s: State, now: number): CacheTaxStatus {
 }
 
 function cacheState(s: State, now: number) {
-  return s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
+  return s.stopped ? 'stopped' : !s.lastRequestAt || awaitingPrefix(s) ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
 }
 
 function updateStatus($: EngineInterface, s: State, now: number) {
@@ -509,7 +525,7 @@ async function arm($: EngineInterface, s: State) {
   s.retries = 0
   if (now >= s.deadline) return stop($, s, null)
   // A cold window still needs expiry cleanup, but must not send a model request.
-  if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
+  if (s.lastRequestAt && !awaitingPrefix(s) && !isCold(s, now)) {
     const untilCold = s.lastRequestAt + TTL_MS - now
     // Waiting for a turn, or past a skipped ping, sends nothing, but wakes when the cache goes cold so the row says so.
     if (s.waitForTurn || s.skipping) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
@@ -538,7 +554,7 @@ async function ping($: EngineInterface, s: State) {
   if (s.inFlight) return
   if (now >= s.deadline) return arm($, s)
   if (isCold(s, now)) return arm($, s)
-  if (s.compacted || s.waitForTurn || !s.lastRequestAt) return arm($, s)
+  if (awaitingPrefix(s) || s.waitForTurn || !s.lastRequestAt) return arm($, s)
   // A request since this timer was set moved the clock; schedule from it.
   if (now - s.lastRequestAt < s.every - 1000) return arm($, s)
   // A host that slept past a retry's slot must not send it inside the last minute.
@@ -669,8 +685,18 @@ function holdNote(s: State, now: number, then: boolean): string {
   return then ? `keepwarm will then hold the cache for ${fmtDuration(holdMs(s, now))}` : `keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands`
 }
 
+function noRewriteText(s: State, now: number): string {
+  const outcome = s.deadline > now && !s.stopped
+    ? s.always ? `Always keeps keepwarm armed for up to ${fmtDuration(s.deadline - now)}.`
+      : `The existing keepwarm window remains armed for up to ${fmtDuration(s.deadline - now)}; it was not extended for a cold write.`
+    : s.stopped ? `Keepwarm remains stopped: ${s.stopped}. No automatic warming window was opened.`
+      : !autoWarm ? 'Auto keepwarm is off; keepwarm stays off.'
+        : 'No automatic warming window was opened; /keepwarm to arm one.'
+  return `No cold rewrite was detected in the reported usage. ${outcome}`
+}
+
 function armedText(s: State, now: number, windowMs: number): string {
-  const delay = s.lastRequestAt && !s.compacted && !isCold(s, now) ? Math.max(1000, s.lastRequestAt + s.every - now) : s.every
+  const delay = s.lastRequestAt && !awaitingPrefix(s) && !isCold(s, now) ? Math.max(1000, s.lastRequestAt + s.every - now) : s.every
   if (windowMs <= delay) return `keepwarm on for ${fmtDuration(windowMs)}. At the current timing, the window ends before a ping is due; use a longer window or a shorter every period`
   if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written` +
@@ -680,8 +706,9 @@ function armedText(s: State, now: number, windowMs: number): string {
 // A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
 // before deciding to open a window passes the count it read first. An always renewal also passes the always
 // generation it read, so a /keepwarm always meanwhile wins the same way.
-async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen) {
-  const stale = () => s.offs !== offs || s.alwaysGen !== gen
+async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen, expectedSid?: string) {
+  const moved = () => expectedSid !== undefined && s.sid !== expectedSid
+  const stale = () => moved() || s.offs !== offs || s.alwaysGen !== gen
   if (stale()) return
   const now = await $.clock.now()
   if (stale()) return
@@ -693,7 +720,9 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   if (!s.sid) return arm($, s)
   if (every === PING_AFTER_MS) await $.store.delete(everyKey(s))
   else await $.store.set(everyKey(s), every)
+  if (moved()) return
   await $.store.set(deadlineKey(s), deadline)
+  if (moved()) return
   if (stale()) {
     // Remove only what this call wrote; a window armed after the off or the always change is left alone.
     if ((await $.store.get(deadlineKey(s))) === deadline) {
@@ -708,7 +737,7 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
 function card(s: State, now: number): string {
   const lines: string[] = []
   lines.push(`${s.lastModel ?? 'model not seen yet'}`)
-  if (s.compacted) lines.push('state       reset by compaction, waiting for the first turn')
+  if (awaitingPrefix(s)) lines.push('state       reset by compaction, waiting for the first turn')
   else if (s.resumedAt) lines.push(mayBeCold(s, now) ? 'state       unknown, resumed without the time of its last response' : `state       resumed without the time of its last response, warm for up to ${fmtDuration(s.resumedAt + TTL_MS - now)} more`)
   else if (!s.lastRequestAt) lines.push('state       no request yet this session')
   else if (isCold(s, now)) lines.push(`state       COLD, last request ${fmtDuration(now - s.lastRequestAt)} ago`)
@@ -733,9 +762,9 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false,
+    display: 'band', hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, alwaysMs: DEFAULT_WINDOW_MS, alwaysGen: 0, lastRequestAt: 0, lastResponseAt: 0, lastModel: null, ctx: 0, compacted: false, prefixReady: false, preCompactCtx: 0,
     resumedAt: 0, transcript: 0, guard: 0, ackedAt: 0, coldWritePending: false, misses: [], pending: null, statusRefresh: null, last: null, warmReceipts: [], idleSpentUsd: 0, idleGen: 0, skipping: false, skipSaid: false, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '', unpricedTold: '', testOnce: false,
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, endingSid: '', unpricedTold: '', testOnce: false,
   }
 }
 
@@ -1026,46 +1055,76 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    let sid = s.sid
+    let gen = s.gen
     if (!e.agentId) {
       await reseat($, s)
-      // The off count when the turn's first request went out: an off after it wins over what the turn opens.
+      sid = s.sid
+      gen = s.gen
+      // Capture the off count before the clock read; an off during that read must still defeat automatic arming.
       if (e.index === 0) s.turnOffs = s.offs
+      const now = await $.clock.now()
+      if (s.sid !== sid) return yield* next(e)
       // A compaction leaves a summary where tens of messages were; a rewind takes a few off. A request over fewer than half the
       // last one's messages is read as a compaction, whether or not session.compact arrived. The context stays as it was, so
       // turn.complete still scores a cold write this turn paid against it before the live figure replaces it.
-      if (e.messageCount * 2 < s.transcript) markCompacted(s)
-      s.transcript = e.messageCount
-      // Only a request sent before any compaction this turn saw can hold a cold write; what follows one is the summary.
-      if (!s.compacted) s.steps++
-      s.lastRequestAt = await $.clock.now()
+      if (s.gen === gen) {
+        if (e.messageCount * 2 < s.transcript) markCompacted(s)
+        s.transcript = e.messageCount
+        gen = s.gen
+      }
+      s.lastRequestAt = now
     }
+    const previous = s.ctx
     const r = yield* next(e)
+    if (s.sid !== sid) return r
     // Each request's write is priced at its own prompt length's tier (Haiku 5.5 changes price at 100k), not the turn's sum.
     const u = r.usage
     if (!e.agentId && u && !s.compacted) {
       const price = priceOf(u.model || e.model, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
+      const rewritten = rewrittenTokens(previous, u.cache_read_input_tokens, u.cache_creation_input_tokens)
       const was = s.stepWrites ?? { tokens: 0, usd: 0, priced: true, largest: 0 }
-      s.stepWrites = { tokens: was.tokens + u.cache_creation_input_tokens, usd: was.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: was.priced && price != null, largest: Math.max(was.largest, u.cache_creation_input_tokens) }
+      s.stepWrites = { tokens: was.tokens + rewritten, usd: was.usd + (price ? rewritten * price[1] / 1e6 : 0), priced: was.priced && (rewritten === 0 || price != null), largest: Math.max(was.largest, rewritten) }
+    }
+    if (!e.agentId && u && s.gen === gen && awaitingPrefix(s) && u.cache_read_input_tokens + u.cache_creation_input_tokens > 0) {
+      // A response over the new prefix can wait on a tool before turn.complete. Its summary write still scores nothing.
+      s.prefixReady = true
+      s.ctx = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+      s.lastModel = u.model || e.model
+      s.waitForTurn = false
+      s.skipping = false
+      s.skipSaid = false
+      s.idleSpentUsd = 0
+      s.idleGen++
+      await arm($, s)
     }
     return r
   })
 
   on('turn.complete', async ($, e, next) => {
+    const sid = s.sid
     const r = await next(e)
-    if (e.agentId) return r
+    if (e.agentId || s.sid !== sid) return r
     // An off at any point in this turn wins over every window the turn would open; a host that raised no
     // step falls back to the count at completion.
     const offs = s.turnOffs ?? s.offs
     s.turnOffs = null
     const now = await $.clock.now()
+    if (s.sid !== sid) return r
     // A sleeping host may deliver this turn before the expired window's timer.
     if (s.deadline && now >= s.deadline) await stop($, s, null)
+    if (s.sid !== sid) return r
     // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
     // A turn aborted before it sent anything touched no cache, so it leaves the clock alone.
     if ((e.usage || !e.isAborted) && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
     if (e.usage || (!e.isAborted && e.reason !== 'error')) s.lastResponseAt = now
     const compacted = s.compacted
-    s.compacted = false
+    const prevContext = compacted ? s.preCompactCtx : s.ctx
+    if (s.prefixReady || e.usage || (!e.isAborted && e.reason !== 'error')) {
+      s.compacted = false
+      s.prefixReady = false
+      s.preCompactCtx = 0
+    }
     if (s.lastRequestAt) s.resumedAt = 0
     s.waitForTurn = false
     if (e.usage || (!e.isAborted && e.reason !== 'error')) {
@@ -1083,55 +1142,56 @@ export const register: Register = (on, options) => {
     if (e.usage) {
       const gen = s.alwaysGen
       const shared = alwaysWindow(await $.store.get(KEY_ALWAYS))
+      if (s.sid !== sid) return r
       // A /keepwarm always during the read set the switch and window itself; the read is older, so it is dropped.
       if (s.offs === offs && s.alwaysGen === gen) {
         s.always = shared > 0
         if (shared) s.alwaysMs = shared
       }
       if (s.always) await startWindow($, s, Math.max(s.alwaysMs, s.deadline - now), PING_AFTER_MS, offs, gen)
+      if (s.sid !== sid) return r
     }
     const u = e.usage
     if (u) {
       if (u.model) s.lastModel = u.model
       tellUnpriced($, s)
-      const prev = s.ctx
+      const prev = prevContext
       // A turn's usage is its responses summed, so a ten-step turn reports ten
       // reads of the context. The live window is the engine's figure; the sum
       // is only the fallback for a host that reports no tokens.
       const written = u.cache_creation_input_tokens
       const live = (await $.session.usage()).context.tokens
+      if (s.sid !== sid) return r
       s.ctx = live && live > 0 ? live : u.input_tokens + u.cache_read_input_tokens + written
-      // A compaction since the last complete turn: what followed it is the summary, no cold write, so the turn is scored
-      // on the requests before it alone. None before it leaves nothing to score, whatever the guard saw; requests before
-      // it that reported no usage leave only the turn's total, an upper bound kept for a send the guard saw go cold.
+      // After compaction, only the preceding requests can prove a rewrite. Summed usage cannot separate the summary.
       const writes = s.stepWrites
-      const write = !compacted ? written : writes ? writes.tokens : s.steps && s.coldWritePending ? written : 0
-      // The sum also holds each request's new tool output, so a long warm turn can write half the context in all; when
-      // the steps reported usage, a cold write is one request writing half of it again.
+      const write = writes ? writes.tokens : compacted ? 0 : rewrittenTokens(prev, u.cache_read_input_tokens, written)
+      // With no per-request receipts this is a conservative estimate: later reads can hide an earlier rewrite.
       const rewrote = writes ? writes.largest : write
       const full = prev > 20000 && rewrote >= 0.5 * prev
       if (full || (s.coldWritePending && write > 0)) {
         // Priced per request when the steps reported usage; otherwise at the tier of the context the comeback re-sent.
         const price = priceOf(s.lastModel, prev || s.ctx)
-        const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
+        const usd = writes ? writes.priced ? writes.usd : null : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
         // With always on, its own window governs renewal, shorter than three hours or not; the guard promised that one.
         const extend = autoWarm && !s.always && s.deadline < now + AUTO_WARM_MS && s.offs === offs
-        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
+        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs, s.alwaysGen, sid)
+        if (s.sid !== sid) return r
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? pingFloor > 0 ? ` Keepwarm armed for up to ${fmtDuration(AUTO_WARM_MS)}` + (coldUsd(s) == null ? '' : '; pings may stop sooner at the idle spending limit') + '. /keepwarm off to stop.' : ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
-      }
+      } else if (s.coldWritePending && write === 0) $.ui.log(noRewriteText(s, now))
     }
     s.coldWritePending = false
     s.stepWrites = null
-    s.steps = 0
     await arm($, s)
     return r
   })
 
   on('session.compact', async ($, e, next) => {
+    const sid = s.sid
     const r = await next(e)
-    if (!e.agentId) {
+    if (!e.agentId && e.trigger !== 'precompute' && r.skip === undefined && s.sid === sid) {
       markCompacted(s)
       // Between turns nothing is left to score, and the next turn's summary write is not a cold write.
       s.ctx = 0
