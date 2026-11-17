@@ -1,6 +1,6 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 import type { Engine, Plugin, TestBody } from 'claude-code/testing'
-import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionCompactInput, SessionCompactResult, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
 import { autoWarmFrom, fmtDuration, freshState, parseDuration, pingFloorFrom, resetForClear, seedFromResume } from '../hooks/register'
@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); modelGate?: () => Promise<void>; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void>; compact?: (e: SessionCompactInput) => SessionCompactResult | Promise<SessionCompactResult> } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -55,6 +55,8 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   const status: Array<string | undefined> = []
   const logs: string[] = []
   const entered: string[] = []
+  const origins: Array<PromptSubmitInput['origin']> = []
+  const filled: string[] = []
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: typeof opts.sid === 'function' ? opts.sid() : opts.sid ?? 'S1' }))
@@ -68,8 +70,9 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: u }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: u }
   })
-  on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
-  on('session.compact', ($, e) => ({ messages: e.messages }))
+  on('prompt.submit', ($, e) => { entered.push(e.text); origins.push(e.origin); return { text: e.text } })
+  on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true as const, text: e.text, cursor: e.text.length } })
+  on('session.compact', ($, e) => opts.compact ? opts.compact(e) : { messages: e.messages })
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
@@ -84,7 +87,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads }
+  return { forks, status, logs, entered, origins, filled, reads }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -2833,8 +2836,8 @@ describe('ask before a cold send', () => {
     expect(r.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
-    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Send it anyway?`)
-    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    expect(asked[0]!.question).toBe(`cache-tax: the prompt cache went cold 2h00m ago. Sending this re-writes up to 200,502 tokens at $20/MTok = $4.01 (a warm turn would have cost $0.05). Don't send saves $4.01; after Send anyway, keepwarm is armed for up to 3h00m. The cache read alone is about $0.05 per ping. Pings may stop sooner at the idle spending limit, leaving the cache to go cold. Compact, then send summarizes the conversation first, as /compact does: the summary request still reads this context cold, and the turns after it run on the summary. Clear, then send starts a new conversation with /clear and sends your message there: nothing is rewritten, and nothing from before is remembered. Send it anyway?`)
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', 'Compact, then send', 'Clear, then send', "Don't send"])
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
     expect(w.logs.at(-1)).toMatch(/cold write of 201k tokens paid \(\$4\.01\)\. Keepwarm armed for up to 3h00m/)
   })
@@ -2867,6 +2870,250 @@ describe('ask before a cold send', () => {
     expect(second.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
     expect(asked.length).toBe(1)
+  })
+
+  test('Compact, then send drops the prompt, compacts, sends it as the person\'s own and scores no cold write', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const order: string[] = []
+    const w: ReturnType<typeof world> = world(on, [], {
+      compact: e => {
+        order.push(`compact, entered ${w.entered.length}`)
+        return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensBefore: 200502, tokensAfter: 9000, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 } }
+      },
+    })
+    const asked = answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    // The engine refuses a compaction under a held prompt, so the hook lets go of it first.
+    expect(r.drop).toBe('cache-tax: compacting first. Your message is sent when the summary is ready.')
+    expect(w.entered).toEqual([])
+    await clock.advance(1)
+    expect(order).toEqual(['compact, entered 0'])
+    expect(w.entered).toEqual(['hi'])
+    expect(w.origins.at(-1)).toMatchObject({ kind: 'plugin', asUser: true })
+    expect(asked.length).toBe(1)
+    expect(w.logs.at(-1)).toBe('compacted before sending (200,502 to 9,000 tokens). The summary request cost $4.01.')
+    expect((await $.command.run(run('cache-tax', 'status'))).text).toMatch(/state       reset by compaction, waiting for the first turn/)
+    // The turn that follows writes the summary: no cold write, so nothing is scored and nothing asks again.
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 9000 }) }))
+    expect((await $.command.run(run('cache-tax', 'status'))).text).toMatch(/session     0 cold writes paid/)
+    await $.prompt.submit(prompt('next'))
+    expect(w.entered).toEqual(['hi', 'next'])
+    expect(asked.length).toBe(1)
+  })
+
+  test('Compact, then send gives the prompt back unsent when the compaction is skipped', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { compact: () => ({ skip: 'blocked by a PreCompact hook' }) })
+    const asked = answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+    expect(w.logs.at(-1)).toBe('the compaction was skipped (blocked by a PreCompact hook), so your message was not sent and is back in the prompt box.')
+    // Nothing was summarized or paid, so the cache is still cold and the resend is asked about again.
+    await $.prompt.submit(prompt('hi'))
+    expect(asked.length).toBe(2)
+  })
+
+  test('Compact, then send gives the prompt back unsent when the compaction fails', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { compact: () => { throw new Error('busy') } })
+    answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    // Still trying: a refusal while the held prompt's turn closes is retried for a few seconds.
+    expect(w.filled).toEqual([])
+    await clock.advance(10_000)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+    // The reason is the engine's own, in brackets.
+    expect(w.logs.at(-1)).toMatch(/^the compaction did not run \(.+\), so your message was not sent and is back in the prompt box\. Run \/compact yourself, then send it\.$/)
+  })
+
+  test('Compact, then send retries a compaction refused while the turn is still closing, then sends', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let calls = 0
+    const w = world(on, [], {
+      compact: e => {
+        if (++calls === 1) throw new Error('a turn is running')
+        return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensBefore: 200_502, tokensAfter: 9_000 } as SessionCompactResult
+      },
+    })
+    answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBe('cache-tax: compacting first. Your message is sent when the summary is ready.')
+    await clock.advance(1)
+    expect(calls).toBe(1)
+    await clock.advance(250)
+    expect(calls).toBe(2)
+    expect(w.filled).toEqual([])
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/^compacted before sending/)
+  })
+
+  test('a /clear while the compaction runs sends nothing and resets nothing in the new conversation', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let finish = () => {}
+    let started = () => {}
+    const running = new Promise<void>(r => { started = r })
+    const w = world(on, [], {
+      compact: async () => {
+        await new Promise<void>(r => { finish = r; started() })
+        return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
+      },
+    })
+    answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    void clock.advance(1)
+    await running
+    await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+    finish()
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual([])
+    expect((await $.command.run(run('cache-tax', 'status'))).text).not.toMatch(/reset by compaction/)
+    // The new conversation is not held up by the old one's compaction.
+    await $.prompt.submit(prompt('fresh'))
+    expect(w.entered).toEqual(['fresh'])
+  })
+
+  test('a second prompt typed while the compaction runs is dropped, not asked about', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let finish = () => {}
+    let started = () => {}
+    const running = new Promise<void>(r => { started = r })
+    const w = world(on, [], {
+      compact: async () => {
+        await new Promise<void>(r => { finish = r; started() })
+        return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
+      },
+    })
+    const asked = answering(on, 'Compact, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('first'))
+    const tick = clock.advance(1)
+    await running
+    expect((await $.prompt.submit(prompt('second'))).drop).toBe('cache-tax: still compacting or clearing for your earlier message, so this was not sent. Send it again when that is done.')
+    expect(asked.length).toBe(1)
+    finish()
+    await tick
+    expect(w.entered).toEqual(['first'])
+  })
+
+  test('Clear, then send runs /clear, then sends the same prompt as the person\'s own into the new conversation', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const order: string[] = []
+    const w: ReturnType<typeof world> = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, async () => {
+      order.push(`clear, entered ${w.entered.length}`)
+      await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+      return { text: '' }
+    })
+    const asked = answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    // A command cannot run under a held prompt, so the hook lets go of it first.
+    expect(r.drop).toBe('cache-tax: clearing first. Your message is sent into the new conversation.')
+    expect(w.entered).toEqual([])
+    await clock.advance(1)
+    expect(order).toEqual(['clear, entered 0'])
+    expect(w.entered).toEqual(['hi'])
+    expect(w.origins.at(-1)).toMatchObject({ kind: 'plugin', asUser: true })
+    expect(w.logs.at(-1)).toBe('cleared before sending: this is a new conversation, so nothing was rewritten.')
+    expect(asked.length).toBe(1)
+    // Nothing was written cold, so nothing is scored, and the next message is not asked about.
+    expect((await $.command.run(run('cache-tax', 'status'))).text).toMatch(/session     0 cold writes paid/)
+    await $.prompt.submit(prompt('next'))
+    expect(w.entered).toEqual(['hi', 'next'])
+    expect(asked.length).toBe(1)
+  })
+
+  test('Clear, then send gives the prompt back unsent when the clear never took effect', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { commands: ['clear'] })
+    // The command answers but the conversation is still there: no session end reached the mod.
+    on('command.run', { command: 'clear' }, () => ({ text: '' }))
+    answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+    expect(w.logs.at(-1)).toBe('the clear did not run, so your message was not sent and is back in the prompt box. Run /clear yourself, then send it.')
+  })
+
+  test('Clear, then send gives the prompt back unsent when the command is refused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, () => { throw new Error('busy') })
+    answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('hi'))
+    await clock.advance(1)
+    expect(w.filled).toEqual([])
+    await clock.advance(10_000)
+    expect(w.entered).toEqual([])
+    expect(w.filled).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/^the clear did not run \(.+\), so your message was not sent/)
+  })
+
+  test('a second prompt typed while the clear runs is dropped, not asked about', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let finish = () => {}
+    let started = () => {}
+    const running = new Promise<void>(r => { started = r })
+    const w = world(on, [], { commands: ['clear'] })
+    on('command.run', { command: 'clear' }, async () => {
+      await new Promise<void>(r => { finish = r; started() })
+      await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+      return { text: '' }
+    })
+    const asked = answering(on, 'Clear, then send')
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('first'))
+    const tick = clock.advance(1)
+    await running
+    expect((await $.prompt.submit(prompt('second'))).drop).toBe('cache-tax: still compacting or clearing for your earlier message, so this was not sent. Send it again when that is done.')
+    expect(asked.length).toBe(1)
+    finish()
+    await tick
+    expect(w.entered).toEqual(['first'])
+  })
+
+  test('a prompt with a pasted image is not offered the compaction or the clear', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    const asked = answering(on, "Don't send")
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit({ ...prompt('look'), attachments: [{ type: 'image' }] })
+    expect(asked[0]!.options).toEqual(['Send anyway ($4.01)', "Don't send"])
+    expect(asked[0]!.question).not.toMatch(/Compact, then send/)
   })
 
   test('warm sends are not asked about', async ($, on) => {
@@ -2910,8 +3157,8 @@ describe('ask before a cold send', () => {
     const refused = await $.prompt.submit(prompt('hi'))
     expect(refused.drop).toMatch(/keepwarm will be armed for up to 3h00m\./)
     expect(refused.drop).not.toMatch(/idle spending limit/)
-    expect(asked[0]!.options).toEqual(['Send anyway', "Don't send"])
-    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Send it anyway\?$/)
+    expect(asked[0]!.options).toEqual(['Send anyway', 'Compact, then send', 'Clear, then send', "Don't send"])
+    expect(asked[0]!.question).toMatch(/at the cache-write rate = n\/a\. Don't send pays nothing; after Send anyway, keepwarm is armed for up to 3h00m\. Compact, then send summarizes .* Clear, then send starts .* Send it anyway\?$/)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
     await $.turn.complete(turn({ usage: usage({ model: 'some-future-model', cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
@@ -3159,7 +3406,7 @@ describe('the Auto keepwarm option', () => {
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('hi'))
-    expect(asked[0]!.question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Send it anyway\?$/)
+    expect(asked[0]!.question).toMatch(/Don't send saves \$4\.01; after Send anyway, keepwarm stays off \(\/keepwarm to arm it\)\. Compact, then send summarizes .* Clear, then send starts .* Send it anyway\?$/)
   })
 
   test('off: a window armed by hand is promised until its deadline, and keeps pinging after a paid cold write', off, async ($, on) => {
