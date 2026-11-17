@@ -415,12 +415,16 @@ function ackedKey(s: State): string {
   return `${KEY_ACKED}:${s.sid}`
 }
 
+function validDeadline(value: unknown, now: number): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > now && value <= now + MAX_WINDOW_MS
+}
+
 /** Clears this session's own dead window and the bare keys a store written before 2.1.1 still holds. Other sessions' keys are never touched: a read followed by a delete cannot be made atomic against their renewal. */
 async function prune($: EngineInterface, s: State, now: number) {
   for (const key of [KEY_DEADLINE, deadlineKey(s)]) {
     const deadline = await $.store.get(key)
     if (deadline === undefined) continue
-    if (typeof deadline === 'number' && deadline > now) continue
+    if (validDeadline(deadline, now)) continue
     await $.store.delete(key)
     await $.store.delete(KEY_EVERY + key.slice(KEY_DEADLINE.length))
   }
@@ -666,6 +670,8 @@ function holdNote(s: State, now: number, then: boolean): string {
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
+  const delay = s.lastRequestAt && !s.compacted && !isCold(s, now) ? Math.max(1000, s.lastRequestAt + s.every - now) : s.every
+  if (windowMs <= delay) return `keepwarm on for ${fmtDuration(windowMs)}. At the current timing, the window ends before a ping is due; use a longer window or a shorter every period`
   if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written` +
     (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
@@ -803,7 +809,7 @@ export const register: Register = (on, options) => {
     const saved = await $.store.get(deadlineKey(s))
     const savedEvery = await $.store.get(everyKey(s))
     const savedGuard = await $.store.get(KEY_GUARD)
-    s.deadline = typeof saved === 'number' && saved > now ? saved : 0
+    s.deadline = validDeadline(saved, now) ? saved : 0
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
     // A number is refuse with a dollar floor; a release before 2.4.0 reads it as plain refuse.
     s.guard = savedGuard === 'warn' ? 'warn' : typeof savedGuard === 'number' && savedGuard > 0 ? savedGuard : 0
@@ -871,9 +877,9 @@ export const register: Register = (on, options) => {
       ? words.length === 1 ? DEFAULT_WINDOW_MS : words.length === 2 ? parseDuration(words[1]!) : null
       : !words.length ? DEFAULT_WINDOW_MS : parseDuration(mode!)) ?? 0
     let every = PING_AFTER_MS
-    const usage = 'keepwarm takes a window such as 6h or 90m, or always, off, or status'
+    const usage = 'keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged'
     if (mode === 'off' || mode === 'status') {
-      if (words.length !== 1) return { text: usage }
+      if (words.length !== 1) return { text: `${mode} takes no other words; keepwarm is unchanged` }
     } else if (mode === 'always') {
       if (window < TTL_MS || window > MAX_WINDOW_MS) return { text: 'always takes one window from 1h to 168h, such as always 24h' }
     } else {

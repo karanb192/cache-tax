@@ -97,7 +97,7 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
                             ask only at $5 or more; below that, show the price and send
     /cache-tax guard test   ask once on the next prompt you send as if the cache were cold, priced at this session's context; the test scores nothing, a send into a really cold cache is scored as usual
 
-Extra words, invalid durations and windows outside the limits are rejected without changing the current warming window.
+`/keepwarm` rejects extra words, invalid durations and windows outside the limits without changing the current warming window. It also discards invalid or overlong stored deadlines on startup. A window that ends before its first ping is due says so in its reply.
 
 The question, verbatim, with **Send anyway ($4.01)** and **Don't send** beneath it:
 
@@ -186,7 +186,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [309 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [314 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. A ping billed across a stop still counts, one finishing after a turn does not, and an errored turn keeps the skip. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.

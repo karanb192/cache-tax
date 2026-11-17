@@ -1152,6 +1152,45 @@ describe('prices', () => {
 })
 
 describe('keepwarm input', () => {
+  for (const saved of [Infinity, Number.MAX_SAFE_INTEGER, START + 169 * HOUR]) {
+    test(`discards an invalid stored deadline ${saved}`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const store = new Map<string, unknown>([['deadline:S1', saved], ['every:S1', MIN]])
+      const w = world(on, [warm], { store })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      expect(store.has('deadline:S1')).toBe(false)
+      expect(store.has('every:S1')).toBe(false)
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+      await clock.advance(HOUR)
+      expect(w.forks.length).toBe(0)
+    })
+  }
+
+  test('restores the longest valid stored deadline', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:S1', START + 168 * HOUR]])
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 168 * HOUR)
+    expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/keepwarm 7d 0h left/)
+  })
+
+  test('a short window explains when its current timing cannot reach a ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    const short = await $.command.run(run('keepwarm', '30m'))
+    expect(short.text).toMatch(/window ends before a ping is due/)
+    await clock.advance(30 * MIN)
+    expect(w.forks.length).toBe(0)
+    const later = await $.command.run(run('keepwarm', '30m'))
+    expect(later.text).toMatch(/a ping 50m after each idle stretch/)
+    await clock.advance(20 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
   test('duration arithmetic rejects infinite and unsafe results', async () => {
     expect(parseDuration('9'.repeat(310) + 'h')).toBe(null)
     expect(parseDuration('999999999999h')).toBe(null)
@@ -1174,7 +1213,9 @@ describe('keepwarm input', () => {
       const before = [...store]
       writes.length = 0
       const reply = await $.command.run(run('keepwarm', args))
-      expect(reply.text).toBe('keepwarm takes a window such as 6h or 90m, or always, off, or status')
+      expect(reply.text).toBe(args.startsWith('off ') ? 'off takes no other words; keepwarm is unchanged'
+        : args.startsWith('status ') ? 'status takes no other words; keepwarm is unchanged'
+        : 'keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged')
       expect([...store]).toEqual(before)
       expect(writes).toEqual([])
       expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/24h00m left · ping in 50m/)
@@ -1236,7 +1277,7 @@ describe('keepwarm input', () => {
       world(on, [])
       await $.session.start(session)
       const r = await $.command.run(run('keepwarm', args))
-      expect(r.text).toBe('keepwarm takes a window such as 6h or 90m, or always, off, or status')
+      expect(r.text).toBe('keepwarm takes a window from 1m to 168h, such as 6h or 90m, or always, off, or status; keepwarm is unchanged')
     })
   }
 
