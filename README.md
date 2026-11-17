@@ -67,6 +67,8 @@ The tally follows cache receipts. For each request, it estimates the old context
 
 If the host reports only summed turn usage, the estimate can miss a rewrite hidden by later cache reads, and a turn that compacted is left unscored without per-request receipts.
 
+When a guard-allowed send has no detected rewrite, a completion note explains that no automatic cold-write window was opened, or names the existing warming state. This does not confirm the server's cache state from summed usage. A cold-write completion interrupted by `/clear` cannot open its automatic window in the replacement conversation.
+
 Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. If a ping finds nothing to fork, a one-line note says so once, and the pings start after your next message. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns that reaches the cache leaves at least the always window (six hours by default) at the default period, subject to the idle spending limit and a successful warm readback. `/keepwarm always 24h` makes that floor 24 hours instead, for every session (1h to 168h; bare `/keepwarm always` goes back to six). The same turn brings back a window that stopped, stretches a shorter one to the always window and resets a testing period; a longer window you set stays. `/keepwarm off` in any session stops every session rolling from its next turn. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
 
 ### A recorded warming ping
@@ -188,7 +190,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [308 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [314 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Auto keepwarm option:** off scores a paid cold write without arming keepwarm and says so in the refusal and the question; a window armed by hand is promised until its deadline and keeps pinging; always still renews for six hours.
 - **Ping floor option:** cumulative spend stops a long break, a main turn resets it, re-arming cannot reset it, a recent cheap receipt survives an expensive outlier, a model switch is priced before the next ping, and an off command during the model read cancels that ping. A ping billed across a stop still counts, one finishing after a turn does not, and an errored turn keeps the skip. Existing skip, compaction, clear, unknown-context and disabled-limit coverage remains.

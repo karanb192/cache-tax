@@ -668,6 +668,16 @@ function holdNote(s: State, now: number, then: boolean): string {
   return then ? `keepwarm will then hold the cache for ${fmtDuration(holdMs(s, now))}` : `keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands`
 }
 
+function noRewriteText(s: State, now: number): string {
+  const outcome = s.deadline > now && !s.stopped
+    ? s.always ? `Always keeps keepwarm armed for up to ${fmtDuration(s.deadline - now)}.`
+      : `The existing keepwarm window remains armed for up to ${fmtDuration(s.deadline - now)}; it was not extended for a cold write.`
+    : s.stopped ? `Keepwarm remains stopped: ${s.stopped}. No automatic warming window was opened.`
+      : !autoWarm ? 'Auto keepwarm is off; keepwarm stays off.'
+        : 'No automatic warming window was opened; /keepwarm to arm one.'
+  return `No cold rewrite was detected in the reported usage. ${outcome}`
+}
+
 function armedText(s: State, now: number, windowMs: number): string {
   if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` + (pingFloor > 0 && coldUsd(s) != null ? '; pings may stop sooner at the idle spending limit' : '')
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written` +
@@ -677,8 +687,9 @@ function armedText(s: State, now: number, windowMs: number): string {
 // A /keepwarm off after `offs` was read wins: the window it cancelled is not written back. A caller that awaited
 // before deciding to open a window passes the count it read first. An always renewal also passes the always
 // generation it read, so a /keepwarm always meanwhile wins the same way.
-async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen) {
-  const stale = () => s.offs !== offs || s.alwaysGen !== gen
+async function startWindow($: EngineInterface, s: State, windowMs: number, every: number, offs = s.offs, gen = s.alwaysGen, expectedSid?: string) {
+  const moved = () => expectedSid !== undefined && s.sid !== expectedSid
+  const stale = () => moved() || s.offs !== offs || s.alwaysGen !== gen
   if (stale()) return
   const now = await $.clock.now()
   if (stale()) return
@@ -690,7 +701,9 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   if (!s.sid) return arm($, s)
   if (every === PING_AFTER_MS) await $.store.delete(everyKey(s))
   else await $.store.set(everyKey(s), every)
+  if (moved()) return
   await $.store.set(deadlineKey(s), deadline)
+  if (moved()) return
   if (stale()) {
     // Remove only what this call wrote; a window armed after the off or the always change is left alone.
     if ((await $.store.get(deadlineKey(s))) === deadline) {
@@ -1113,11 +1126,11 @@ export const register: Register = (on, options) => {
         s.misses.push({ at: now, tokens: write, usd })
         // With always on, its own window governs renewal, shorter than three hours or not; the guard promised that one.
         const extend = autoWarm && !s.always && s.deadline < now + AUTO_WARM_MS && s.offs === offs
-        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
+        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs, s.alwaysGen, sid)
         if (s.sid !== sid) return r
         $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
           (extend ? pingFloor > 0 ? ` Keepwarm armed for up to ${fmtDuration(AUTO_WARM_MS)}` + (coldUsd(s) == null ? '' : '; pings may stop sooner at the idle spending limit') + '. /keepwarm off to stop.' : ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
-      }
+      } else if (s.coldWritePending && write === 0) $.ui.log(noRewriteText(s, now))
     }
     s.coldWritePending = false
     s.stepWrites = null

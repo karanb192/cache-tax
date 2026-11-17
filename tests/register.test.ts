@@ -1589,7 +1589,7 @@ describe('cold-write receipt evidence', () => {
         expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
         expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
         expect(store.has('deadline:S1')).toBe(false)
-        expect(w.logs).toEqual([])
+        expect(w.logs).toEqual(['No cold rewrite was detected in the reported usage. No automatic warming window was opened; /keepwarm to arm one.'])
         await clock.advance(50 * MIN)
         expect(w.forks.length).toBe(0)
       })
@@ -1713,6 +1713,67 @@ describe('cold-write receipt evidence', () => {
     expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/context     0 tokens/)
   })
+
+  for (const mode of ['manual', 'always', 'disabled', 'stopped'] as const) {
+    test(`a guarded hit reports the ${mode} warming state without promising an automatic window`, { options: { autoWarm: mode === 'disabled' ? 'off' : 'on' } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      if (mode === 'stopped') await $.command.run(run('keepwarm', '3h'))
+      await clock.advance(3 * HOUR)
+      await $.prompt.submit(prompt('continue'))
+      await $.prompt.submit(prompt('continue'))
+      if (mode === 'manual') await $.command.run(run('keepwarm', '90m'))
+      else if (mode === 'always') await $.command.run(run('keepwarm', 'always 2h'))
+      await $.turn.complete(turn())
+      const outcome = mode === 'manual' ? 'The existing keepwarm window remains armed for up to 1h30m; it was not extended for a cold write.'
+        : mode === 'always' ? 'Always keeps keepwarm armed for up to 2h00m.'
+          : mode === 'stopped' ? 'Keepwarm remains stopped: the engine did not send the ping, either the snapshot was cold or the API call failed. No automatic warming window was opened.'
+            : 'Auto keepwarm is off; keepwarm stays off.'
+      expect(w.logs.at(-1)).toBe(`No cold rewrite was detected in the reported usage. ${outcome}`)
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(mode === 'disabled' ? /^keepwarm is off$/ : mode === 'stopped' ? /^keepwarm stopped:/ : mode === 'always' ? /^keepwarm 2h00m left/ : /^keepwarm 1h30m left/)
+    })
+  }
+
+  for (const seatBeforeRelease of [false, true]) {
+    test(`clear during the automatic window clock read cannot arm ${seatBeforeRelease ? 'the replacement session' : 'the unseated conversation'}`, async ($, on) => {
+      let hold = false
+      let reads = 0
+      let sid = 'S1'
+      let release = () => {}
+      let opened = () => {}
+      const held = new Promise<void>(resolve => { opened = resolve })
+      on('clock.now', async () => {
+        if (hold && ++reads === 2) {
+          hold = false
+          await new Promise<void>(resolve => { release = resolve; opened() })
+        }
+        return { value: START }
+      })
+      on('clock.after', () => new Promise<{ value: void }>(() => {}))
+      on('clock.every', () => new Promise<{ value: void }>(() => {}))
+      const store = new Map<string, unknown>()
+      const w = world(on, [], { store, sid: () => sid })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      hold = true
+      const pending = $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+      await held
+      await $.session.end({ reason: 'clear', sessionId: 'S1', resume: { id: 'S1' } })
+      sid = 'S2'
+      if (seatBeforeRelease) await $.classic.SessionStart({ source: 'clear', session_id: sid })
+      release()
+      await pending
+      if (!seatBeforeRelease) await $.classic.SessionStart({ source: 'clear', session_id: sid })
+      expect((await $.command.run(run('keepwarm', 'status'))).text).toBe('keepwarm is off')
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
+      expect(store.has('deadline:S1')).toBe(false)
+      expect(store.has('deadline:S2')).toBe(false)
+      expect(w.logs).toEqual([])
+    })
+  }
 })
 
 describe('per-request pricing and window extension', () => {
@@ -2822,7 +2883,7 @@ describe('a managed plugin above the user tier', () => {
     await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
     await step($, 'comeback', 0, 3)
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 150000 }) }))
-    expect(w.logs).toEqual([])
+    expect(w.logs).toEqual(['No cold rewrite was detected in the reported usage. No automatic warming window was opened; /keepwarm to arm one.'])
     expect(w.status.at(-1)).toBe(undefined)
     expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/session     0 cold writes paid/)
   })
