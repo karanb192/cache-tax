@@ -416,7 +416,7 @@ function ackedKey(s: State): string {
 }
 
 function validDeadline(value: unknown, now: number): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > now && value <= now + MAX_WINDOW_MS
+  return typeof value === 'number' && value > now && value <= now + MAX_WINDOW_MS
 }
 
 /** Clears this session's own dead window and the bare keys a store written before 2.1.1 still holds. Other sessions' keys are never touched: a read followed by a delete cannot be made atomic against their renewal. */

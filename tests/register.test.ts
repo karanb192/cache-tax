@@ -1152,7 +1152,7 @@ describe('prices', () => {
 })
 
 describe('keepwarm input', () => {
-  for (const saved of [Infinity, Number.MAX_SAFE_INTEGER, START + 169 * HOUR]) {
+  for (const saved of [null, Infinity, Number.MAX_SAFE_INTEGER, START + 169 * HOUR]) {
     test(`discards an invalid stored deadline ${saved}`, async ($, on) => {
       const clock = mock.clock(on, { now: START })
       const store = new Map<string, unknown>([['deadline:S1', saved], ['every:S1', MIN]])
@@ -1174,6 +1174,15 @@ describe('keepwarm input', () => {
     await $.session.start(session)
     expect(store.get('deadline:S1')).toBe(START + 168 * HOUR)
     expect((await $.command.run(run('keepwarm', 'status'))).text).toMatch(/keepwarm 7d 0h left/)
+  })
+
+  test('restores a bounded deadline from a fractional millisecond clock', async ($, on) => {
+    mock.clock(on, { now: START + 0.5 })
+    const deadline = START + 0.5 + 168 * HOUR
+    const store = new Map<string, unknown>([['deadline:S1', deadline]])
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(deadline)
   })
 
   test('a short window explains when its current timing cannot reach a ping', async ($, on) => {
