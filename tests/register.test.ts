@@ -78,7 +78,9 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: [opts.bandText ?? ''] }))
-  on('model.fork', async () => {
+  const forkRequests: Array<Record<string, unknown>> = []
+  on('model.fork', async ($, e) => {
+    forkRequests.push(e as unknown as Record<string, unknown>)
     forks.push(forks.length)
     if (opts.gate) await opts.gate()
     const a = forkAnswers.shift()
@@ -88,7 +90,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads }
+  return { forks, forkRequests, status, logs, entered, reads }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -705,6 +707,19 @@ describe('keepwarm', () => {
     expect(w.status.at(-1)).toMatch(/keepwarm 5h10m left · ping in 50m · last ping read 200k \$0\.05/)
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(2)
+  })
+
+  test('the ping asks for a straight answer and names no effort of its own', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forkRequests.length).toBe(1)
+    const req = w.forkRequests[0]!
+    expect(req.prompt).toBe('You have no tools and should answer straight away without thinking it over. Reply with the single word: warm')
+    expect(req.effort).toBeUndefined()
   })
 
   test('a new turn resets the countdown', async ($, on) => {

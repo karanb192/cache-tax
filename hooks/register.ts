@@ -14,7 +14,10 @@ const BIG_TOKENS = 50000
 /** A warm ping reads the prefix and writes only its own message: a write of this share of the read or more means the prefix broke. */
 const WARM_WRITE_SHARE = 0.1
 const DEFAULT_PING_FLOOR = 2
-const PING_PROMPT = 'Reply with the single word: warm'
+// A fork thinks as hard as the session does, and naming another effort can cost a cache write of the whole conversation on a
+// model without per-message effort (ModelForkRequest). Asking for haste in the prompt moves nothing ahead of it, so the cache
+// is read on every model.
+const PING_PROMPT = 'You have no tools and should answer straight away without thinking it over. Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
